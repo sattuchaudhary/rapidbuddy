@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -83,6 +83,9 @@ const RepoAgentList = () => {
   });
   const [formErrors, setFormErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+
+  // Ref for auto-focusing first input field
+  const nameInputRef = useRef(null);
   
   // Data Mapping Dialog State
   const [openMappingDialog, setOpenMappingDialog] = useState(false);
@@ -262,6 +265,13 @@ const RepoAgentList = () => {
       draCertificate: null,
       profilePhoto: null
     });
+    
+    // Auto-focus the first input field after dialog opens
+    setTimeout(() => {
+      if (nameInputRef.current) {
+        nameInputRef.current.focus();
+      }
+    }, 100);
   };
 
   const handleCloseAddDialog = () => {
@@ -609,7 +619,14 @@ const RepoAgentList = () => {
                           month: 'numeric', 
                           day: 'numeric', 
                           year: 'numeric' 
-                        }) : 'N/A'
+                        }) : 
+                        (agent._id ? 
+                          new Date(agent._id.getTimestamp()).toLocaleDateString('en-US', { 
+                            month: 'numeric', 
+                            day: 'numeric', 
+                            year: 'numeric' 
+                          }) : 'N/A'
+                        )
                       }
                     </TableCell>
                     <TableCell>
@@ -818,6 +835,7 @@ const RepoAgentList = () => {
             {/* Right Column */}
             <Box>
               <TextField
+                ref={nameInputRef}
                 fullWidth
                 label="Name *"
                 value={formData.name}
@@ -825,6 +843,7 @@ const RepoAgentList = () => {
                 error={!!formErrors.name}
                 helperText={formErrors.name}
                 sx={{ mb: 2 }}
+                autoFocus
               />
               
               <TextField

@@ -7,8 +7,8 @@ import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 
-import App from './App';
-import { AuthProvider } from './contexts/AuthContext';
+import App from './App.jsx';
+import { AuthProvider } from './contexts/AuthContext.jsx';
 
 // Create theme
 const theme = createTheme({
@@ -28,8 +28,8 @@ const theme = createTheme({
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
 // Configure global axios base URL once for the entire app
-// Uses REACT_APP_API_URL in production, falls back to localhost in development
-axios.defaults.baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+// Uses VITE_API_URL in production, falls back to localhost in development
+axios.defaults.baseURL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 axios.defaults.withCredentials = true;
 
 // Rewrite absolute localhost URLs to relative so baseURL applies

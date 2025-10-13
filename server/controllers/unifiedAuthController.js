@@ -5,57 +5,85 @@ const Tenant = require('../models/Tenant');
 const { getTenantDB } = require('../config/database');
 const mongoose = require('mongoose');
 
-// Helper function to get OfficeStaff model
+// Helper function to get OfficeStaff model (reuse existing model)
 const getOfficeStaffModel = (tenantConnection) => {
-  const officeStaffSchema = new mongoose.Schema({
-    name: { type: String, required: true, trim: true },
-    phoneNumber: { type: String, required: true, trim: true },
-    role: { type: String, required: true, enum: ['Sub Admin', 'Vehicle Confirmer', 'Manager', 'Supervisor', 'Staff'] },
-    password: { type: String, required: true },
-    status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
-    createdBy: { type: String, required: true }
-  }, { timestamps: true });
-
-  // Hash password before save
-  officeStaffSchema.pre('save', async function(next) {
-    if (!this.isModified('password')) return next();
-    try {
-      const salt = await bcrypt.genSalt(12);
-      this.password = await bcrypt.hash(this.password, salt);
-      next();
-    } catch (err) {
-      next(err);
+  try {
+    // Try to get existing model first
+    if (tenantConnection.models && tenantConnection.models.OfficeStaff) {
+      return tenantConnection.model('OfficeStaff');
     }
-  });
+    
+    // If model doesn't exist, create it
+    const officeStaffSchema = new mongoose.Schema({
+      name: { type: String, required: true, trim: true },
+      phoneNumber: { type: String, required: true, trim: true },
+      role: { type: String, required: true, enum: ['Sub Admin', 'Vehicle Confirmer', 'Manager', 'Supervisor', 'Staff'] },
+      password: { type: String, required: true },
+      status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
+      createdBy: { type: String, required: true }
+    }, { timestamps: true });
 
-  return tenantConnection.model('OfficeStaff', officeStaffSchema);
+    // Hash password before save
+    officeStaffSchema.pre('save', async function(next) {
+      if (!this.isModified('password')) return next();
+      try {
+        const salt = await bcrypt.genSalt(12);
+        this.password = await bcrypt.hash(this.password, salt);
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
+
+    return tenantConnection.model('OfficeStaff', officeStaffSchema);
+  } catch (error) {
+    if (error.name === 'OverwriteModelError') {
+      // Model already exists, return it
+      return tenantConnection.model('OfficeStaff');
+    }
+    throw error;
+  }
 };
 
-// Helper function to get RepoAgent model
+// Helper function to get RepoAgent model (reuse existing model)
 const getRepoAgentModel = (tenantConnection) => {
-  const repoAgentSchema = new mongoose.Schema({
-    name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, trim: true, lowercase: true },
-    phoneNumber: { type: String, required: true, trim: true },
-    password: { type: String, required: true },
-    role: { type: String, default: 'Repo Agent' },
-    status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
-    createdBy: { type: String, required: true }
-  }, { timestamps: true });
-
-  // Hash password before save
-  repoAgentSchema.pre('save', async function(next) {
-    if (!this.isModified('password')) return next();
-    try {
-      const salt = await bcrypt.genSalt(12);
-      this.password = await bcrypt.hash(this.password, salt);
-      next();
-    } catch (err) {
-      next(err);
+  try {
+    // Try to get existing model first
+    if (tenantConnection.models && tenantConnection.models.RepoAgent) {
+      return tenantConnection.model('RepoAgent');
     }
-  });
+    
+    // If model doesn't exist, create it
+    const repoAgentSchema = new mongoose.Schema({
+      name: { type: String, required: true, trim: true },
+      email: { type: String, required: true, trim: true, lowercase: true },
+      phoneNumber: { type: String, required: true, trim: true },
+      password: { type: String, required: true },
+      role: { type: String, default: 'Repo Agent' },
+      status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
+      createdBy: { type: String, required: true }
+    }, { timestamps: true });
 
-  return tenantConnection.model('RepoAgent', repoAgentSchema);
+    // Hash password before save
+    repoAgentSchema.pre('save', async function(next) {
+      if (!this.isModified('password')) return next();
+      try {
+        const salt = await bcrypt.genSalt(12);
+        this.password = await bcrypt.hash(this.password, salt);
+        next();
+      } catch (err) {
+        next(err);
+      }
+    });
+
+    return tenantConnection.model('RepoAgent', repoAgentSchema);
+  } catch (error) {
+    if (error.name === 'OverwriteModelError') {
+      // Model already exists, return it
+      return tenantConnection.model('RepoAgent');
+    }
+    throw error;
+  }
 };
 
 // Generate JWT token
@@ -75,7 +103,9 @@ const unifiedLogin = async (req, res) => {
       });
     }
 
-    console.log(`[UnifiedLogin] Attempting login for: ${identifier}`);
+    // Avoid logging raw identifiers to prevent sensitive data exposure
+    const redactedId = typeof identifier === 'string' ? identifier.replace(/.(?=.{3})/g, '*') : '***';
+    console.log('[UnifiedLogin] Attempting login');
 
     // Step 1: Check main system users (Super Admin, Tenant Admin, Regular Users)
     const mainUser = await User.findOne({ 
@@ -97,7 +127,7 @@ const unifiedLogin = async (req, res) => {
           tenantId: mainUser.tenantId
         });
 
-        console.log(`[UnifiedLogin] Main user login successful: ${mainUser.email}`);
+        console.log('[UnifiedLogin] Main user login successful');
 
         return res.json({
           success: true,
@@ -191,7 +221,7 @@ const unifiedLogin = async (req, res) => {
         role: user.role || userType
       });
 
-      console.log(`[UnifiedLogin] Tenant user login successful: ${user.name} (${userType})`);
+      console.log('[UnifiedLogin] Tenant user login successful');
 
       return res.json({
         success: true,

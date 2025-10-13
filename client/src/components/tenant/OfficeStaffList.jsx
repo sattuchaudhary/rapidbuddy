@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -81,6 +81,9 @@ const OfficeStaffList = () => {
   });
   const [formErrors, setFormErrors] = useState({});
 
+  // Ref for auto-focusing first input field
+  const nameInputRef = useRef(null);
+
   useEffect(() => {
     fetchOfficeStaff();
   }, []);
@@ -161,6 +164,13 @@ const OfficeStaffList = () => {
     setOpenAddDialog(true);
     setFormErrors({});
     setDialogError('');
+    
+    // Auto-focus the first input field after dialog opens
+    setTimeout(() => {
+      if (nameInputRef.current) {
+        nameInputRef.current.focus();
+      }
+    }, 100);
   };
 
   const handleCloseAddDialog = () => {
@@ -508,7 +518,14 @@ const OfficeStaffList = () => {
                           month: 'numeric', 
                           day: 'numeric', 
                           year: 'numeric' 
-                        }) : 'N/A'
+                        }) : 
+                        (staffMember._id ? 
+                          new Date(staffMember._id.getTimestamp()).toLocaleDateString('en-US', { 
+                            month: 'numeric', 
+                            day: 'numeric', 
+                            year: 'numeric' 
+                          }) : 'N/A'
+                        )
                       }
                     </TableCell>
                     <TableCell>
@@ -715,6 +732,7 @@ const OfficeStaffList = () => {
             {/* Right Column */}
             <Box>
               <TextField
+                ref={nameInputRef}
                 fullWidth
                 label="Name *"
                 name="name"
@@ -723,6 +741,7 @@ const OfficeStaffList = () => {
                 sx={{ mb: 2 }}
                 error={!!formErrors.name}
                 helperText={formErrors.name}
+                autoFocus
               />
 
               <TextField

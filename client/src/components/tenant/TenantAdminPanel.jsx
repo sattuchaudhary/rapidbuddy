@@ -21,7 +21,6 @@ import {
   CardContent,
   Grid,
   Chip,
-  CheckCircle,
   Alert,
   CircularProgress,
   TextField,
@@ -47,6 +46,7 @@ import {
   Wifi as WifiIcon,
   Phone as PhoneIcon,
   DirectionsCar as CarIcon,
+  CheckCircle,
   TwoWheeler as MotorcycleIcon,
   LocalShipping as TruckIcon,
   Search as SearchIcon

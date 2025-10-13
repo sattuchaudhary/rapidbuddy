@@ -4,20 +4,20 @@ import { Box, CircularProgress, ThemeProvider } from '@mui/material';
 import theme from './styles/theme';
 import './styles/global.css';
 
-import { useAuth } from './contexts/AuthContext';
-import LandingPage from './components/LandingPage';
-import ModernLogin from './components/auth/ModernLogin';
-import Register from './components/auth/Register';
-import Dashboard from './components/dashboard/Dashboard';
-import AdminDashboard from './components/admin/AdminDashboard';
-import UserManagement from './components/admin/UserManagement';
-import TenantManagement from './components/admin/TenantManagement';
-import VersionManagement from './components/admin/VersionManagement';
-import Settings from './components/Settings';
-import TenantAdminPanel from './components/tenant/TenantAdminPanel';
-import Profile from './components/profile/Profile';
-import Layout from './components/layout/Layout';
-import ProtectedRoute from './components/auth/ProtectedRoute';
+import { useAuth } from './contexts/AuthContext.jsx';
+import LandingPage from './components/LandingPage.jsx';
+import ModernLogin from './components/auth/ModernLogin.jsx';
+import Register from './components/auth/Register.jsx';
+import Dashboard from './components/dashboard/Dashboard.jsx';
+import AdminDashboard from './components/admin/AdminDashboard.jsx';
+import UserManagement from './components/admin/UserManagement.jsx';
+import TenantManagement from './components/admin/TenantManagement.jsx';
+import VersionManagement from './components/admin/VersionManagement.jsx';
+import Settings from './components/Settings.jsx';
+import TenantAdminPanel from './components/tenant/TenantAdminPanel.jsx';
+import Profile from './components/profile/Profile.jsx';
+import Layout from './components/layout/Layout.jsx';
+import ProtectedRoute from './components/auth/ProtectedRoute.jsx';
 
 function App() {
   const { loading, isAuthenticated, user } = useAuth();

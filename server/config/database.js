@@ -3,8 +3,12 @@ const mongoose = require('mongoose');
 const connectDB = async () => {
   try {
     const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+      maxPoolSize: 20, // Maximum number of connections (reduced for VPS)
+      serverSelectionTimeoutMS: 5000, // Keep trying to send operations for 5 seconds
+      socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
+      maxIdleTimeMS: 30000, // Close connections after 30 seconds of inactivity
+      minPoolSize: 2, // Minimum number of connections (reduced for VPS)
+      connectTimeoutMS: 10000, // Connection timeout
     });
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
@@ -31,8 +35,10 @@ const getTenantDB = async (tenantName) => {
   const tenantUri = queryString ? `${derivedBase}?${queryString}` : derivedBase;
 
   const conn = mongoose.createConnection(tenantUri, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
+    maxPoolSize: 10, // Smaller pool for tenant connections
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 30000,
+    connectTimeoutMS: 10000,
   });
 
   await new Promise((resolve, reject) => {

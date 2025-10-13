@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -56,6 +56,9 @@ const ClientManagement = () => {
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [submitting, setSubmitting] = useState(false);
 
+  // Ref for auto-focusing input field
+  const nameInputRef = useRef(null);
+
 
   const fetchClients = useCallback(async () => {
     try {
@@ -93,6 +96,16 @@ const ClientManagement = () => {
   useEffect(() => {
     fetchClients();
   }, [fetchClients]);
+
+  // Auto-focus when dialog opens
+  useEffect(() => {
+    if (openDialog && nameInputRef.current) {
+      const timer = setTimeout(() => {
+        nameInputRef.current.focus();
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [openDialog]);
 
   const handleOpenDialog = (client = null) => {
     if (client) {
@@ -301,7 +314,11 @@ const ClientManagement = () => {
               ) : (
                 paginatedClients.map((client) => (
                   <TableRow key={client._id || client.id} hover>
-                    <TableCell>{client.clientId || client._id || client.id}</TableCell>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                        {client.clientId || client._id || client.id}
+                      </Typography>
+                    </TableCell>
                     <TableCell>
                       <Typography variant="subtitle2" fontWeight="bold">
                         {client.name}
@@ -309,15 +326,13 @@ const ClientManagement = () => {
                     </TableCell>
                     <TableCell>
                       {client.createdOn ? 
-                        (typeof client.createdOn === 'string' ? 
-                          client.createdOn : 
-                          new Date(client.createdOn).toLocaleDateString('en-US', { 
-                            month: 'short', 
-                            day: '2-digit', 
-                            year: 'numeric' 
-                          })
-                        ) : 
-                        'N/A'
+                        new Date(client.createdOn).toLocaleDateString('en-US', { 
+                          month: 'short', 
+                          day: '2-digit', 
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        }) : 'N/A'
                       }
                     </TableCell>
                     <TableCell align="center">
@@ -367,19 +382,30 @@ const ClientManagement = () => {
       </Box>
 
       {/* Create/Edit Client Dialog */}
-      <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="md" fullWidth>
+      <Dialog 
+        open={openDialog} 
+        onClose={handleCloseDialog} 
+        maxWidth="md" 
+        fullWidth
+      >
         <DialogTitle>
           {editingClient ? 'Edit Client' : 'Add New Client'}
         </DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 3 }}>
             <TextField
+              ref={nameInputRef}
               fullWidth
               label="Name *"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               required
               placeholder="Enter client name"
+              autoFocus
+              inputProps={{
+                autoFocus: true,
+                tabIndex: 0
+              }}
             />
           </Box>
         </DialogContent>
