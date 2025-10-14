@@ -7,6 +7,9 @@ import { getBaseURL, setBaseURLOverride } from '../utils/config';
 import NetInfo from '@react-native-community/netinfo';
 import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
+import React, { useEffect, useState } from 'react';
+import { View, Text, FlatList, ActivityIndicator } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function BulkOfflineDownloadScreen() {
   const insets = useSafeAreaInsets();
@@ -20,6 +23,9 @@ export default function BulkOfflineDownloadScreen() {
   const [filesInfo, setFilesInfo] = useState({ serverFileCount: 0, localFileCount: 0 });
   const [mirrorDeletes, setMirrorDeletes] = useState(false);
   const isMountedRef = useRef(true);
+  const [offlineRecords, setOfflineRecords] = useState([]);
+  const [multiplier, setMultiplier] = useState(1);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -32,6 +38,48 @@ export default function BulkOfflineDownloadScreen() {
       } catch (e) {}
     })();
     return () => { isMountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    (async () => {
+      // load multiplier saved by tenant admin (key: 'tenantMultiplier')
+      try {
+        const m = await AsyncStorage.getItem('tenantMultiplier');
+        if (isMountedRef.current) setMultiplier(m ? Number(m) : 1);
+      } catch (e) {
+        if (isMountedRef.current) setMultiplier(1);
+      }
+
+      // existing local data load: if you already have a loader function, it will run here.
+      // If you have an existing fetch/refresh logic in this component, merge it here.
+      try {
+        // try common loader names if present in this file/scope
+        if (typeof fetchLocalRecords === 'function') {
+          const recs = await fetchLocalRecords();
+          if (isMountedRef.current) setOfflineRecords(recs || []);
+        } else if (typeof loadLocalRecords === 'function') {
+          const recs = await loadLocalRecords();
+          if (isMountedRef.current) setOfflineRecords(recs || []);
+        } else {
+          // fallback: set counts from existing states if already managed elsewhere
+          if (isMountedRef.current) {
+            // keep existing localCount/localDownloaded if they are set elsewhere
+            // otherwise try to infer from offlineRecords (if that gets set later)
+            setOfflineRecords((prev) => prev || []);
+          }
+        }
+      } catch (e) {
+        if (isMountedRef.current) setOfflineRecords([]);
+      } finally {
+        if (isMountedRef.current) setLoading(false);
+      }
+    })();
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   const refreshServerStats = useCallback(async () => {
@@ -117,12 +165,20 @@ export default function BulkOfflineDownloadScreen() {
     }
   }, [isDownloading, refreshServerStats]);
 
-  const Stat = ({ label, value }) => (
-    <View style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' }}>
-      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>{label}</Text>
-      <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', marginTop: 4 }}>{(value || 0).toLocaleString()}</Text>
-    </View>
-  );
+  const Stat = ({ label, value }) => {
+    // Only apply multiplier for local/offline/download related stats.
+    const l = String(label || '').toLowerCase();
+    const shouldMultiply = l.includes('local') || l.includes('offline') || l.includes('download');
+    const baseVal = Number(value || 0);
+    const displayVal = shouldMultiply ? baseVal * (Number(multiplier) || 1) : baseVal;
+
+    return (
+      <View style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' }}>
+        <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>{label}</Text>
+        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', marginTop: 4 }}>{(displayVal || 0).toLocaleString()}</Text>
+      </View>
+    );
+  };
 
   const Progress = () => (
     <View style={{ marginTop: 12 }}>

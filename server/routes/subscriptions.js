@@ -31,7 +31,49 @@ router.get('/', tenantAuth, async (req, res) => {
   try {
     const tenantId = getTenantContext(req);
     const list = await UserSubscription.find({ tenantId }).sort({ updatedAt: -1 }).lean();
-    res.json({ success: true, data: list });
+
+    // Get tenant name
+    let tenantName = req.user?.tenantName;
+    if (!tenantName && tenantId) {
+      const Tenant = require('../models/Tenant');
+      const tenantDoc = await Tenant.findById(tenantId);
+      tenantName = tenantDoc?.name;
+    }
+    // Get tenant DB connection
+    const { getTenantDB } = require('../config/database');
+    const conn = await getTenantDB(tenantName);
+    // Get dynamic models
+  const { getRepoAgentModel, getOfficeStaffModel } = require('./tenantUsers');
+    const RepoAgent = getRepoAgentModel(conn);
+    const OfficeStaff = getOfficeStaffModel(conn);
+
+    // Enhance each subscription with user name and mobile
+    const enhancedList = await Promise.all(list.map(async (sub) => {
+      let user = null;
+      try {
+        const userId = String(sub.mobileUserId);
+        if (sub.userType === 'repo_agent') {
+          user = await RepoAgent.findOne({ $or: [
+            { _id: userId },
+            { agentId: userId }
+          ] }).lean();
+        } else if (sub.userType === 'office_staff') {
+          user = await OfficeStaff.findOne({ $or: [
+            { _id: userId },
+            { staffId: userId }
+          ] }).lean();
+        }
+      } catch (lookupErr) {
+        console.error('User lookup failed for subscription:', sub, lookupErr);
+      }
+      return {
+        ...sub,
+        userName: user?.name || '',
+        userMobile: user?.phoneNumber || '',
+      };
+    }));
+
+    res.json({ success: true, data: enhancedList });
   } catch (err) {
     console.error('List subscriptions error:', err);
     res.status(500).json({ success: false, message: 'Internal server error' });

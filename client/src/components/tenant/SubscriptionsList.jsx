@@ -32,6 +32,8 @@ const SubscriptionsList = () => {
           <Table size="small">
             <TableHead>
               <TableRow>
+                <TableCell>User Name</TableCell>
+                <TableCell>Mobile Number</TableCell>
                 <TableCell>Mobile User ID</TableCell>
                 <TableCell>User Type</TableCell>
                 <TableCell>Start</TableCell>
@@ -44,6 +46,8 @@ const SubscriptionsList = () => {
                 const active = it.endDate && new Date(it.endDate) > new Date();
                 return (
                   <TableRow key={`${it.mobileUserId}`}>
+                    <TableCell>{it.userName || '-'}</TableCell>
+                    <TableCell>{it.userMobile || '-'}</TableCell>
                     <TableCell>{it.mobileUserId}</TableCell>
                     <TableCell>{it.userType}</TableCell>
                     <TableCell>{it.startDate ? new Date(it.startDate).toLocaleString() : '-'}</TableCell>
@@ -53,7 +57,7 @@ const SubscriptionsList = () => {
                 );
               })}
               {items.length === 0 && (
-                <TableRow><TableCell colSpan={5} align="center">No subscriptions yet</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} align="center">No subscriptions yet</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
