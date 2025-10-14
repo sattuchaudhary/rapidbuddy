@@ -9,7 +9,7 @@ export default defineConfig({
     'process.env': {}
   },
   server: {
-    host: 'rapidbudy.cloud',
+    host: 'localhost',
     port: 3000,
     strictPort: true,
     open: false,

@@ -192,8 +192,17 @@ const RepoAgentList = () => {
       console.log('API Response:', response.data);
       
       if (response.data.success) {
-        setAgents(response.data.data || []);
-        console.log(`Loaded ${response.data.data?.length || 0} repo agents from database`);
+        const agentsData = response.data.data || [];
+        // Log the first agent's data to check the date fields
+        if (agentsData.length > 0) {
+          console.log('Sample agent data:', {
+            createdAt: agentsData[0].createdAt,
+            _id: agentsData[0]._id,
+            createdDate: new Date(agentsData[0].createdAt)
+          });
+        }
+        setAgents(agentsData);
+        console.log(`Loaded ${agentsData.length || 0} repo agents from database`);
       } else {
         setError('Failed to fetch repo agents: Invalid response format');
         setAgents([]);
@@ -614,20 +623,36 @@ const RepoAgentList = () => {
                     <TableCell>{agent.email || 'N/A'}</TableCell>
                     <TableCell>{agent.phoneNumber || agent.mobile || agent.phone || 'N/A'}</TableCell>
                     <TableCell>
-                      {agent.createdAt ? 
-                        new Date(agent.createdAt).toLocaleDateString('en-US', { 
-                          month: 'numeric', 
-                          day: 'numeric', 
-                          year: 'numeric' 
-                        }) : 
-                        (agent._id ? 
-                          new Date(agent._id.getTimestamp()).toLocaleDateString('en-US', { 
-                            month: 'numeric', 
-                            day: 'numeric', 
-                            year: 'numeric' 
-                          }) : 'N/A'
-                        )
-                      }
+                      {(() => {
+                        try {
+                          if (agent.createdAt) {
+                            const date = new Date(agent.createdAt);
+                            if (!isNaN(date.getTime())) {
+                              return date.toLocaleDateString('en-US', {
+                                month: 'numeric',
+                                day: 'numeric',
+                                year: 'numeric'
+                              });
+                            }
+                          }
+                          // Try to extract date from _id if createdAt is not available
+                          if (agent._id && agent._id.length >= 8) {
+                            const timestamp = parseInt(agent._id.substring(0, 8), 16) * 1000;
+                            const date = new Date(timestamp);
+                            if (!isNaN(date.getTime())) {
+                              return date.toLocaleDateString('en-US', {
+                                month: 'numeric',
+                                day: 'numeric',
+                                year: 'numeric'
+                              });
+                            }
+                          }
+                          return 'N/A';
+                        } catch (err) {
+                          console.error('Error formatting date:', err);
+                          return 'N/A';
+                        }
+                      })()}
                     </TableCell>
                     <TableCell>
                       <Box sx={{ width: 16, height: 16, bgcolor: 'success.main', borderRadius: 1 }} />

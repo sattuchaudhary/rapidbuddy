@@ -513,20 +513,36 @@ const OfficeStaffList = () => {
                       />
                     </TableCell>
                     <TableCell>
-                      {staffMember.createdAt ? 
-                        new Date(staffMember.createdAt).toLocaleDateString('en-US', { 
-                          month: 'numeric', 
-                          day: 'numeric', 
-                          year: 'numeric' 
-                        }) : 
-                        (staffMember._id ? 
-                          new Date(staffMember._id.getTimestamp()).toLocaleDateString('en-US', { 
-                            month: 'numeric', 
-                            day: 'numeric', 
-                            year: 'numeric' 
-                          }) : 'N/A'
-                        )
-                      }
+                      {(() => {
+                        try {
+                          if (staffMember.createdAt) {
+                            const date = new Date(staffMember.createdAt);
+                            if (!isNaN(date.getTime())) {
+                              return date.toLocaleDateString('en-US', {
+                                month: 'numeric',
+                                day: 'numeric',
+                                year: 'numeric'
+                              });
+                            }
+                          }
+                          // Try to extract date from _id if createdAt is not available
+                          if (staffMember._id && staffMember._id.length >= 8) {
+                            const timestamp = parseInt(staffMember._id.substring(0, 8), 16) * 1000;
+                            const date = new Date(timestamp);
+                            if (!isNaN(date.getTime())) {
+                              return date.toLocaleDateString('en-US', {
+                                month: 'numeric',
+                                day: 'numeric',
+                                year: 'numeric'
+                              });
+                            }
+                          }
+                          return 'N/A';
+                        } catch (err) {
+                          console.error('Error formatting date:', err);
+                          return 'N/A';
+                        }
+                      })()}
                     </TableCell>
                     <TableCell>
                       <Box sx={{ width: 16, height: 16, bgcolor: 'success.main', borderRadius: 1 }} />

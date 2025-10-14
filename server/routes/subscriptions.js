@@ -53,23 +53,37 @@ router.get('/', tenantAuth, async (req, res) => {
       try {
         const userId = String(sub.mobileUserId);
         if (sub.userType === 'repo_agent') {
-          user = await RepoAgent.findOne({ $or: [
-            { _id: userId },
-            { agentId: userId }
-          ] }).lean();
+          user = await RepoAgent.findOne({ 
+            $or: [
+              { _id: userId },
+              { agentId: userId },
+              { id: userId }
+            ]
+          }).lean();
         } else if (sub.userType === 'office_staff') {
-          user = await OfficeStaff.findOne({ $or: [
-            { _id: userId },
-            { staffId: userId }
-          ] }).lean();
+          user = await OfficeStaff.findOne({
+            $or: [
+              { _id: userId },
+              { staffId: userId },
+              { id: userId }
+            ]
+          }).lean();
         }
       } catch (lookupErr) {
-        console.error('User lookup failed for subscription:', sub, lookupErr);
+        console.error('User lookup failed for subscription:', {
+          subscriptionId: sub._id,
+          userType: sub.userType,
+          userId: sub.mobileUserId,
+          error: lookupErr.message
+        });
       }
+      const fullName = user?.fullName || user?.name || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || 'N/A';
+      const mobile = user?.phoneNumber || user?.mobile || user?.phone || 'N/A';
+      
       return {
         ...sub,
-        userName: user?.name || '',
-        userMobile: user?.phoneNumber || '',
+        userName: fullName,
+        userMobile: mobile,
       };
     }));
 
