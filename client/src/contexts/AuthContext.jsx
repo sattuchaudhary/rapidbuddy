@@ -115,7 +115,7 @@ export const AuthProvider = ({ children }) => {
     try {
       dispatch({ type: AUTH_ACTIONS.SET_LOADING, payload: true });
       
-      const res = await axios.post('/api/unified-auth/login', { 
+const res = await axios.post('/api/unified-auth/login', { 
         identifier, 
         password 
       });

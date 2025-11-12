@@ -9,13 +9,13 @@ export default defineConfig({
     'process.env': {}
   },
   server: {
-    host: 'localhost',
+    host: true,
     port: 3000,
     strictPort: true,
     open: false,
-    proxy: {
+proxy: {
       '/api': {
-        target: 'https://rapidbudy.cloud',
+        target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false
       }
@@ -30,6 +30,3 @@ export default defineConfig({
     sourcemap: false
   }
 });
-
-
-

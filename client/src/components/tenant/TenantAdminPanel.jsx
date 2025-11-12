@@ -56,7 +56,10 @@ import { useAuth } from '../../contexts/AuthContext';
 import ClientManagement from './ClientManagement';
 import OfficeStaffList from './OfficeStaffList';
 import RepoAgentList from './RepoAgentList';
+import AddUser from './AddUser';
 import UserDetailView from './UserDetailView';
+import RegisterRepoAgent from './RegisterRepoAgent';
+import RegisterOfficeStaff from './RegisterOfficeStaff';
 import PendingApprovals from './PendingApprovals';
 import MobileUpload from './MobileUpload';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -572,19 +575,19 @@ const TenantAdminPanel = () => {
             </>
           )}
 
-          {location.pathname === '/app/tenant/users/staff' && (
-            <OfficeStaffList />
-          )}
-
-          {location.pathname === '/app/tenant/users/agents' && (
-            <RepoAgentList />
-          )}
-
-          {/* Detail routes */}
-          {location.pathname.startsWith('/app/tenant/users/staff/') && (
+          {location.pathname === '/app/tenant/users/staff' && <OfficeStaffList />}
+          {location.pathname === '/app/tenant/users/staff/register' && <RegisterOfficeStaff />}
+          {location.pathname === '/app/tenant/users/staff/add' && <AddUser />}
+          {location.pathname.startsWith('/app/tenant/users/staff/edit/') && <AddUser />}
+          {location.pathname.match(/^\/app\/tenant\/users\/staff\/[^/]+$/) && !location.pathname.endsWith('/add') && !location.pathname.endsWith('/register') && (
             <UserDetailView type="staff" />
           )}
-          {location.pathname.startsWith('/app/tenant/users/agents/') && (
+
+          {location.pathname === '/app/tenant/users/agents' && <RepoAgentList />}
+          {location.pathname === '/app/tenant/users/agents/register' && <RegisterRepoAgent />}
+          {location.pathname === '/app/tenant/users/agents/add' && <AddUser />}
+          {location.pathname.startsWith('/app/tenant/users/agents/edit/') && <AddUser />}
+          {location.pathname.match(/^\/app\/tenant\/users\/agents\/[^/]+$/) && !location.pathname.endsWith('/add') && !location.pathname.endsWith('/register') && (
             <UserDetailView type="agent" />
           )}
 

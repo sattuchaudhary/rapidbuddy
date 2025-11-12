@@ -81,8 +81,12 @@ const MobileUpload = () => {
   const [banks, setBanks] = useState([]);
   const [file, setFile] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [processingProgress, setProcessingProgress] = useState(0); // Server-side processing progress
+  const [processingMessage, setProcessingMessage] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState('');
+  const [uploadId, setUploadId] = useState(null);
+  const [previewProgress, setPreviewProgress] = useState(0); // Preview loading progress
   const [previewData, setPreviewData] = useState([]);
   const [uploadHistory, setUploadHistory] = useState([]);
   const [errors, setErrors] = useState([]);
@@ -264,9 +268,20 @@ const MobileUpload = () => {
   };
 
   const autoLoadFile = async (selectedFile) => {
+    let progressInterval = null;
+    
     try {
       setIsLoadingPreview(true);
       setCurrentAction('Auto-loading file...');
+      setPreviewProgress(0);
+      
+      // Simulate progress for preview (file reading is usually fast)
+      progressInterval = setInterval(() => {
+        setPreviewProgress(prev => {
+          if (prev >= 90) return prev;
+          return prev + 10;
+        });
+      }, 200);
       
       const formData = new FormData();
       formData.append('file', selectedFile);
@@ -291,8 +306,19 @@ const MobileUpload = () => {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'multipart/form-data'
+        },
+        timeout: 30000, // 30 seconds timeout
+        onUploadProgress: (progressEvent) => {
+          const progress = Math.round((progressEvent.loaded * 50) / progressEvent.total); // 0-50% for upload
+          setPreviewProgress(progress);
         }
       });
+      
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+      setPreviewProgress(100);
 
       if (response.data.success) {
         setPreviewData(response.data.data);
@@ -312,19 +338,35 @@ const MobileUpload = () => {
       }
     } catch (error) {
       console.error('Auto-load error:', error);
+      
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+      
       const code = error.response?.data?.error;
       const message = error.response?.data?.message;
-      if (code === 'PASSWORD_REQUIRED' || code === 'INVALID_PASSWORD') {
+      
+      // Handle timeout
+      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        toast.error('Preview timeout. File is too large. Please proceed directly to upload or use a smaller file.');
+        setPreviewProgress(0);
+      } else if (code === 'FILE_TOO_LARGE_FOR_PREVIEW' || code === 'PREVIEW_TIMEOUT') {
+        toast.warn(message || 'File is too large for preview. Please proceed directly to upload.');
+        setPreviewProgress(0);
+      } else if (code === 'PASSWORD_REQUIRED' || code === 'INVALID_PASSWORD') {
         setPendingAction('preview');
         setShowPasswordDialog(true);
         setPasswordError(code === 'INVALID_PASSWORD' ? (message || 'Invalid password') : '');
         toast.warn(message || 'Password required to open this file');
       } else {
         toast.error(message || 'Failed to auto-load file');
+        setPreviewProgress(0);
       }
     } finally {
       setIsLoadingPreview(false);
       setCurrentAction('');
+      setPreviewProgress(0);
     }
   };
 
@@ -406,6 +448,10 @@ const MobileUpload = () => {
       }
 
       const token = localStorage.getItem('token');
+      
+      // Start polling for server-side processing progress
+      let progressPollInterval = null;
+      
       const response = await axios.post('/api/tenant/mobile/upload', formData, {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -415,12 +461,60 @@ const MobileUpload = () => {
         maxContentLength: 10 * 1024 * 1024 * 1024, // 10GB (practically unlimited)
         maxBodyLength: 10 * 1024 * 1024 * 1024, // 10GB (practically unlimited)
         onUploadProgress: (progressEvent) => {
-          const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setUploadProgress(progress);
+          // File upload progress (0-30% of total)
+          const fileUploadProgress = Math.round((progressEvent.loaded * 30) / progressEvent.total);
+          setUploadProgress(fileUploadProgress);
         }
       });
-
+      
       if (response.data.success) {
+        // Get upload ID from response
+        const responseUploadId = response.data.uploadId || response.headers['x-upload-id'];
+        
+        // If we have final results, use them directly
+        if (response.data.inserted !== undefined) {
+          // Processing is complete, show final results
+          setUploadProgress(100);
+          setProcessingProgress(100);
+          setProcessingMessage('Upload completed successfully!');
+        } else if (responseUploadId) {
+          // Processing might still be in progress, start polling
+          setUploadId(responseUploadId);
+          
+          // Poll for server-side processing progress (30-100% of total)
+          progressPollInterval = setInterval(async () => {
+            try {
+              const progressResponse = await axios.get(`/api/tenant/mobile/upload-progress/${responseUploadId}`, {
+                headers: {
+                  Authorization: `Bearer ${token}`
+                }
+              });
+              
+              if (progressResponse.data.success) {
+                const serverProgress = progressResponse.data.progress || 0;
+                // Combine: 30% file upload + 70% server processing
+                const totalProgress = Math.min(30 + Math.round(serverProgress * 0.7), 100);
+                setProcessingProgress(serverProgress);
+                setUploadProgress(totalProgress);
+                setProcessingMessage(progressResponse.data.message || '');
+                
+                // Stop polling when complete
+                if (serverProgress >= 100) {
+                  clearInterval(progressPollInterval);
+                  setUploadProgress(100);
+                  setProcessingProgress(100);
+                }
+              }
+            } catch (err) {
+              console.error('Progress polling error:', err);
+              // Continue polling even if one request fails
+            }
+          }, 1000); // Poll every second
+        } else {
+          // No upload ID, assume complete
+          setUploadProgress(100);
+          setProcessingProgress(100);
+        }
         setUploadStatus('Upload completed successfully');
         setSuccessCount(response.data.inserted || 0);
         setErrorCount(response.data.errors?.length || 0);
@@ -443,10 +537,15 @@ const MobileUpload = () => {
         setRawRows([]);
         setColumnMapping({});
         setHeaderMapping({});
+        setUploadId(null);
       } else {
         throw new Error(response.data.message || 'Upload failed');
       }
     } catch (error) {
+      // Stop progress polling on error
+      if (progressPollInterval) {
+        clearInterval(progressPollInterval);
+      }
       console.error('Upload error:', error);
       const code = error.response?.data?.error;
       const message = error.response?.data?.message;
@@ -692,14 +791,28 @@ const MobileUpload = () => {
           }}>
             <RefreshIcon sx={{ fontSize: 40, animation: 'spin 1s linear infinite', color: 'primary.main' }} />
             <Typography variant="h6" color="primary.main">
-              {currentAction || 'Processing...'}
+              {currentAction || processingMessage || 'Processing...'}
             </Typography>
-            {isLoadingUpload && (
-              <Box sx={{ width: '100%', mt: 1 }}>
-                <LinearProgress />
-                <Typography variant="body2" sx={{ mt: 1, textAlign: 'center' }}>
-                  {uploadProgress}% Complete
+            {(isLoadingUpload || isLoadingPreview) && (
+              <Box sx={{ width: '100%', mt: 1, minWidth: 300 }}>
+                <LinearProgress 
+                  variant="determinate" 
+                  value={isLoadingUpload ? uploadProgress : previewProgress}
+                  sx={{ height: 8, borderRadius: 4 }}
+                />
+                <Typography variant="body2" sx={{ mt: 1, textAlign: 'center', fontWeight: 600 }}>
+                  {isLoadingUpload ? `${uploadProgress}%` : `${previewProgress}%`} Complete
                 </Typography>
+                {isLoadingUpload && processingMessage && (
+                  <Typography variant="caption" sx={{ mt: 0.5, textAlign: 'center', color: 'text.secondary' }}>
+                    {processingMessage}
+                  </Typography>
+                )}
+                {isLoadingUpload && processingProgress > 0 && (
+                  <Typography variant="caption" sx={{ mt: 0.5, textAlign: 'center', color: 'text.secondary' }}>
+                    Processing: {processingProgress}% • Upload: {uploadProgress}%
+                  </Typography>
+                )}
               </Box>
             )}
           </Box>

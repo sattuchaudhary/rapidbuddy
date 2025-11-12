@@ -6,6 +6,7 @@ import axios from 'axios';
 import { getBaseURL } from '../utils/config';
 import * as FileSystem from 'expo-file-system/legacy';
 import { searchByRegSuffix, searchByChassis } from '../utils/db';
+import { logError } from '../utils/errorHandler';
 
 export default function SearchResultsScreen({ route, navigation }) {
   const { q = '', preloadedData = null, fromDashboard = false, instantSearch = false, offline = false } = route.params || {};
@@ -133,7 +134,9 @@ export default function SearchResultsScreen({ route, navigation }) {
           scrollViewRef.current.scrollTo({ y: 0, animated: false });
         }
       }
-    } catch (_) {}
+    } catch (error) {
+      logError(error, 'SearchResultsScreen.preloadedAnimation', 'Failed to set initial animation state');
+    }
     // Only run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -172,7 +175,9 @@ export default function SearchResultsScreen({ route, navigation }) {
     try {
       modalSlideAnim.stopAnimation && modalSlideAnim.stopAnimation();
       modalOpacityAnim.stopAnimation && modalOpacityAnim.stopAnimation();
-    } catch (_) {}
+    } catch (error) {
+      logError(error, 'SearchResultsScreen.modalAnimationStop', 'Failed to stop modal animations');
+    }
     modalSlideAnim.setValue(300);
     modalOpacityAnim.setValue(0);
 
@@ -184,7 +189,9 @@ export default function SearchResultsScreen({ route, navigation }) {
     // Refocus registration input for instant next search
     try {
       regSuffixInputRef.current && regSuffixInputRef.current.focus();
-    } catch (_) {}
+    } catch (error) {
+      logError(error, 'SearchResultsScreen.inputRefocus', 'Failed to refocus registration input');
+    }
   }, [modalSlideAnim, modalOpacityAnim]);
 
   // Helper: log search click to server with robust error reporting
@@ -348,7 +355,9 @@ export default function SearchResultsScreen({ route, navigation }) {
             }
           }, 100); // Small delay to prioritize UI rendering
         }
-      } catch (_) {}
+      } catch (error) {
+        logError(error, 'SearchResultsScreen.loadAgentAndMapping', 'Failed to load agent data or field mapping');
+      }
     })();
   }, []);
 
@@ -404,12 +413,15 @@ export default function SearchResultsScreen({ route, navigation }) {
     };
     try {
       let text = '🚗 *Vehicle Details*\n\n';
-      text += `👤 *Name:* ${getFieldValue(veh.customerName, 'customerName')}\n`;
-      text += `🔢 *Vehicle:* ${getFieldValue(veh.regNo, 'regNo')}\n`;
-      text += `🔧 *Chassis:* ${getFieldValue(veh.chassisNo, 'chassisNo')}\n`;
-      text += `⚙️ *Engine:* ${getFieldValue(veh.engineNo, 'engineNo')}\n`;
-      text += `🏭 *Make:* ${getFieldValue(veh.make, 'make')}\n`;
-      text += `🚘 *Model:* ${getFieldValue(veh.model, 'model')}\n`;
+      text += ` *Loan Number:* ${getFieldValue(veh.loanNo, 'loanNo')}\n`;
+      text += ` *Name:* ${getFieldValue(veh.customerName, 'customerName')}\n`;
+      text += ` *Vehicle:* ${getFieldValue(veh.regNo, 'regNo')}\n`;
+      text += ` *Chassis:* ${getFieldValue(veh.chassisNo, 'chassisNo')}\n`;
+      text += ` *Engine:* ${getFieldValue(veh.engineNo, 'engineNo')}\n`;
+      text += ` *Make:* ${getFieldValue(veh.make, 'make')}\n`;
+      text += ` *Model:* ${getFieldValue(veh.model, 'model')}\n`;
+      text += ` *Bank:* ${getFieldValue(veh.bank, 'bank')}\n`;
+
       return text;
     } catch (_) {
       return 'Vehicle details';
@@ -1516,5 +1528,3 @@ const styles = StyleSheet.create({
     width: '70%' 
   }
 });
-
-

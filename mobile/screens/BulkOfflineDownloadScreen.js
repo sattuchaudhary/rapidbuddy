@@ -1,15 +1,16 @@
+
+
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert, ScrollView } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { initDatabase, countVehicles } from '../utils/db';
-import { singleClickPerFileSync, getPerFileSyncStatus, downloadAllViaChunks } from '../utils/fileSync';
+import { smartSync, getPerFileSyncStatus } from '../utils/fileSync';
 import { getBaseURL, setBaseURLOverride } from '../utils/config';
 import NetInfo from '@react-native-community/netinfo';
 import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
-import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
 
 export default function BulkOfflineDownloadScreen() {
   const insets = useSafeAreaInsets();
@@ -21,7 +22,6 @@ export default function BulkOfflineDownloadScreen() {
   const [serverTotal, setServerTotal] = useState(0);
   const [localDownloaded, setLocalDownloaded] = useState(0);
   const [filesInfo, setFilesInfo] = useState({ serverFileCount: 0, localFileCount: 0 });
-  const [mirrorDeletes, setMirrorDeletes] = useState(false);
   const isMountedRef = useRef(true);
   const [offlineRecords, setOfflineRecords] = useState([]);
   const [multiplier, setMultiplier] = useState(1);
@@ -40,17 +40,50 @@ export default function BulkOfflineDownloadScreen() {
     return () => { isMountedRef.current = false; };
   }, []);
 
-  useEffect(() => {
-    isMountedRef.current = true;
+  const loadMultiplierFromServer = useCallback(async () => {
+    try {
+      const token = await SecureStore.getItemAsync('token');
+      if (!token) {
+        console.log('📊 No token found, using default multiplier');
+        if (isMountedRef.current) setMultiplier(1);
+        return;
+      }
 
-    (async () => {
-      // load multiplier saved by tenant admin (key: 'tenantMultiplier')
+      const res = await axios.get(`${getBaseURL()}/api/tenants/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10000
+      });
+
+      if (res.data?.success && res.data.data?.dataMultiplier) {
+        const multiplierValue = res.data.data.dataMultiplier;
+        if (isMountedRef.current) {
+          setMultiplier(multiplierValue);
+          // Also save to AsyncStorage for quick access
+          await AsyncStorage.setItem('tenantMultiplier', String(multiplierValue));
+        }
+        console.log(`📊 Loaded sync multiplier from server: ${multiplierValue}x`);
+      } else {
+        console.log('📊 No multiplier setting found, using default');
+        if (isMountedRef.current) setMultiplier(1);
+      }
+    } catch (error) {
+      console.error('📊 Error loading multiplier from server:', error.response?.status, error.response?.data || error.message);
+      // Fallback to AsyncStorage if server fails
       try {
         const m = await AsyncStorage.getItem('tenantMultiplier');
         if (isMountedRef.current) setMultiplier(m ? Number(m) : 1);
       } catch (e) {
         if (isMountedRef.current) setMultiplier(1);
       }
+    }
+  }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    (async () => {
+      // Load multiplier from server (same as DashboardScreen)
+      await loadMultiplierFromServer();
 
       // existing local data load: if you already have a loader function, it will run here.
       // If you have an existing fetch/refresh logic in this component, merge it here.
@@ -89,86 +122,59 @@ export default function BulkOfflineDownloadScreen() {
       setServerTotal(s?.totalServer || 0);
       setLocalDownloaded(s?.totalLocal || 0);
       setFilesInfo({ serverFileCount: s?.serverFileCount || 0, localFileCount: s?.localFileCount || 0 });
+      // Also refresh multiplier in case it was changed on server
+      await loadMultiplierFromServer();
     } catch (_) {}
-  }, []);
+  }, [loadMultiplierFromServer]);
 
-  const handleDownload = useCallback(async () => {
+  const handleSmartSync = useCallback(async () => {
     if (isDownloading) return;
     setIsDownloading(true);
     setProgressPct(0);
-    setInserted(0);
-    setStatusText('Starting...');
+    setStatusText('Starting sync...');
 
     try {
-      // Preflight diagnostics
-      const token = await SecureStore.getItemAsync('token');
-      if (!token) {
-        throw new Error('Not logged in (no token). Please login again.');
-      }
+      const syncResult = await smartSync((p) => {
+        if (!isMountedRef.current) return;
+        setProgressPct(p.progress);
+        setStatusText(p.status);
+      });
 
-      const net = await NetInfo.fetch();
-      if (!net?.isConnected || !net?.isInternetReachable) {
-        throw new Error(`No internet connection. Connected: ${String(net?.isConnected)} Reachable: ${String(net?.isInternetReachable)}`);
-      }
-
-      // Ping health endpoint quickly
-      const base = getBaseURL();
-      try {
-        await axios.get(`${base}/api/health`, { timeout: 2500 });
-      } catch (pingErr) {
-        // Fallback to api subdomain if primary host isn't reachable
-        const alt = base.includes('api.') ? base.replace('api.', '') : base.replace('https://', 'https://api.');
-        try {
-          await axios.get(`${alt}/api/health`, { timeout: 2500 });
-          setBaseURLOverride(alt);
-        } catch (altErr) {
-          const msg = pingErr?.message || altErr?.message || 'Ping failed';
-          throw new Error(`API not reachable: ${msg}`);
+      // Wait a bit to ensure all transactions are committed
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Refresh stats and count
+      await refreshServerStats();
+      // Reload multiplier from server in case it was changed
+      await loadMultiplierFromServer();
+      const cnt = await countVehicles();
+      if (isMountedRef.current) {
+        setLocalCount(cnt || 0);
+        console.log(`📊 Updated local count after sync: ${cnt}`);
+        if (syncResult?.inserted) {
+          console.log(`✅ Sync inserted ${syncResult.inserted} records`);
         }
       }
 
-      await initDatabase();
-      // Prefer chunk-based download (bypasses file listing)
-      const res = await downloadAllViaChunks((p) => {
-        if (!isMountedRef.current) return;
-        const pct = typeof p?.percentage === 'number' ? p.percentage : 0;
-        setProgressPct(pct);
-        setInserted(p?.inserted || 0);
-        const current = p?.currentFile ? ` (${String(p.currentFile).slice(0, 28)})` : '';
-        setStatusText(`Downloaded ${p?.downloadedRecords || 0}/${p?.totalRecords || 0}${current}`);
-      }, 50000, { mirror: mirrorDeletes });
-
-      await refreshServerStats();
-      const cnt = await countVehicles();
-      if (isMountedRef.current) setLocalCount(cnt || 0);
-      if (res?.success) {
-        setProgressPct((prev) => (prev < 99 ? 99 : prev));
-        setStatusText('Finalizing...');
-        setTimeout(() => { if (isMountedRef.current) setProgressPct(100); }, 500);
-      }
     } catch (error) {
       if (isMountedRef.current) {
-        setStatusText('Download failed');
-        const status = error?.response?.status;
-        const serverMsg = error?.response?.data?.message || error?.response?.data?.error;
-        const msg = [
-          status ? `HTTP ${status}` : null,
-          error?.code ? `Code: ${error.code}` : null,
-          serverMsg ? `Server: ${serverMsg}` : null,
-          error?.message || null,
-          `Base URL: ${getBaseURL()}`
-        ].filter(Boolean).join('\n');
-        Alert.alert('Download failed', msg || 'Unknown error');
+        const msg = error?.message || 'An unknown error occurred.';
+        setStatusText(`Error: ${msg}`);
+        Alert.alert('Sync Failed', msg);
       }
     } finally {
-      setTimeout(() => { if (isMountedRef.current) setIsDownloading(false); }, 600);
+      if (isMountedRef.current) {
+        setIsDownloading(false);
+      }
     }
-  }, [isDownloading, refreshServerStats]);
+  }, [isDownloading, refreshServerStats, loadMultiplierFromServer]);
 
   const Stat = ({ label, value }) => {
-    // Only apply multiplier for local/offline/download related stats.
+    // Apply multiplier for all stats except "Files" count
+    // This includes: Local Records, Server Total, Downloaded (server calc)
     const l = String(label || '').toLowerCase();
-    const shouldMultiply = l.includes('local') || l.includes('offline') || l.includes('download');
+    // Don't multiply "Files" count, but multiply everything else
+    const shouldMultiply = !l.includes('files');
     const baseVal = Number(value || 0);
     const displayVal = shouldMultiply ? baseVal * (Number(multiplier) || 1) : baseVal;
 
@@ -212,20 +218,14 @@ export default function BulkOfflineDownloadScreen() {
         </View>
 
         <View style={{ marginTop: 18 }}>
-          <TouchableOpacity onPress={() => setMirrorDeletes(!mirrorDeletes)} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-            <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: mirrorDeletes ? '#22C55E' : 'rgba(255,255,255,0.4)', alignItems: 'center', justifyContent: 'center', backgroundColor: mirrorDeletes ? 'rgba(34,197,94,0.25)' : 'transparent' }}>
-              {mirrorDeletes ? <View style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: '#22C55E' }} /> : null}
-            </View>
-            <Text style={{ color: '#fff' }}>Mirror server deletions (extra step after download)</Text>
-          </TouchableOpacity>
           {!isDownloading ? (
-            <TouchableOpacity onPress={handleDownload} style={{ backgroundColor: '#2563EB', paddingVertical: 14, borderRadius: 10, alignItems: 'center' }}>
-              <Text style={{ color: '#fff', fontWeight: '800' }}>Start Bulk Download</Text>
+            <TouchableOpacity onPress={handleSmartSync} style={{ backgroundColor: '#2563EB', paddingVertical: 14, borderRadius: 10, alignItems: 'center' }}>
+              <Text style={{ color: '#fff', fontWeight: '800' }}>Start Smart Sync</Text>
             </TouchableOpacity>
           ) : (
             <View style={{ backgroundColor: 'rgba(255,255,255,0.06)', paddingVertical: 14, borderRadius: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 10 }}>
               <ActivityIndicator color="#fff" />
-              <Text style={{ color: '#fff', fontWeight: '800' }}>Downloading...</Text>
+              <Text style={{ color: '#fff', fontWeight: '800' }}>Syncing...</Text>
             </View>
           )}
           <Progress />
@@ -238,5 +238,3 @@ export default function BulkOfflineDownloadScreen() {
     </SafeAreaView>
   );
 }
-
-

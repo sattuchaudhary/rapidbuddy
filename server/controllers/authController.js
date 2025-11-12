@@ -133,6 +133,14 @@ const login = async (req, res) => {
       });
     }
 
+    // Check if email is verified
+    if (!user.isEmailVerified) {
+      return res.status(401).json({
+        success: false,
+        message: 'Email is not verified'
+      });
+    }
+
     // Verify password
     const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
@@ -398,4 +406,3 @@ module.exports = {
   changePassword,
   logout
 };
-

@@ -24,7 +24,56 @@ export const getCachedToken = async () => {
   }
 };
 
-// Fast agent data retrieval
+/**
+ * Retrieves cached unified user data from SecureStore.
+ * @returns {Promise<Object|null>} User object with fields: id, name, email, role, userType, tenantId, tenantName, or null if not found/error.
+ */
+export const getCachedUserData = async () => {
+  const cacheKey = 'cached_user_data';
+  const cached = cache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.value;
+  }
+  
+  try {
+    const userData = await SecureStore.getItemAsync('userData');
+    const user = userData ? JSON.parse(userData) : null;
+    cache.set(cacheKey, { value: user, timestamp: Date.now() });
+    return user;
+  } catch (error) {
+    console.error('Error getting cached user data:', error);
+    return null;
+  }
+};
+
+/**
+ * Retrieves cached user role and type for quick routing decisions.
+ * @returns {Promise<Object|null>} Object with { role, userType }, or null if not found/error.
+ */
+export const getCachedUserRole = async () => {
+  const cacheKey = 'cached_user_role';
+  const cached = cache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.value;
+  }
+  
+  try {
+    const userData = await getCachedUserData();
+    if (userData) {
+      const roleData = { role: userData.role, userType: userData.userType };
+      cache.set(cacheKey, { value: roleData, timestamp: Date.now() });
+      return roleData;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error getting cached user role:', error);
+    return null;
+  }
+};
+
+// Fast agent data retrieval with backward compatibility
 export const getCachedAgent = async () => {
   const cacheKey = 'cached_agent';
   const cached = cache.get(cacheKey);
@@ -34,7 +83,25 @@ export const getCachedAgent = async () => {
   }
   
   try {
-    const agentData = await SecureStore.getItemAsync('agent');
+    let agentData = await SecureStore.getItemAsync('agent');
+    if (!agentData) {
+      // Fallback to 'userData' for backward compatibility
+      const userData = await SecureStore.getItemAsync('userData');
+      if (userData) {
+        const user = JSON.parse(userData);
+        agentData = JSON.stringify({
+          id: user.id,
+          name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+          email: user.email,
+          phoneNumber: user.phoneNumber,
+          role: user.role,
+          userType: user.userType,
+          tenantId: user.tenantId,
+          tenantName: user.tenantName,
+          status: 'active' // Assuming active
+        });
+      }
+    }
     const agent = agentData ? JSON.parse(agentData) : null;
     cache.set(cacheKey, { value: agent, timestamp: Date.now() });
     return agent;
@@ -81,20 +148,24 @@ export const clearCache = () => {
 export const preloadCriticalData = async () => {
   try {
     // Preload in parallel without blocking
-    const [token, agent, settings] = await Promise.allSettled([
+    const [token, agent, settings, userData, userRole] = await Promise.allSettled([
       getCachedToken(),
       getCachedAgent(),
-      getCachedSettings()
+      getCachedSettings(),
+      getCachedUserData(),
+      getCachedUserRole()
     ]);
     
     console.log('✅ Critical data preloaded');
     return {
       token: token.status === 'fulfilled' ? token.value : null,
       agent: agent.status === 'fulfilled' ? agent.value : null,
-      settings: settings.status === 'fulfilled' ? settings.value : null
+      settings: settings.status === 'fulfilled' ? settings.value : null,
+      userData: userData.status === 'fulfilled' ? userData.value : null,
+      userRole: userRole.status === 'fulfilled' ? userRole.value : null
     };
   } catch (error) {
     console.error('Error preloading critical data:', error);
-    return { token: null, agent: null, settings: null };
+    return { token: null, agent: null, settings: null, userData: null, userRole: null };
   }
 };

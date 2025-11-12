@@ -57,7 +57,7 @@ const authenticateToken = async (req, res, next) => {
 
 // Check if user is super admin
 const requireSuperAdmin = (req, res, next) => {
-  if (!req.user.isSuperAdmin()) {
+  if (req.user.role !== 'super_admin') {
     return res.status(403).json({
       success: false,
       message: 'Super admin access required'
@@ -68,7 +68,8 @@ const requireSuperAdmin = (req, res, next) => {
 
 // Check if user is admin (super admin or tenant admin)
 const requireAdmin = (req, res, next) => {
-  if (!req.user.isAdmin()) {
+  const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+  if (!isAdmin) {
     return res.status(403).json({
       success: false,
       message: 'Admin access required'

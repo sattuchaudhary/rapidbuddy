@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, FlatList, Image, Modal, Alert, Animated, StatusBar, useColorScheme, Appearance } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, FlatList, Image, Modal, Alert, Animated, StatusBar, useColorScheme, Appearance, ScrollView, RefreshControl } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons'; // Import vector icons
 import * as SecureStore from 'expo-secure-store';
 
 
@@ -595,6 +596,7 @@ import { simpleSync, markSyncCompleted } from '../utils/simpleSync';
 import { smartSync, getIncrementalSyncStatus } from '../utils/incrementalSync';
 import { singleBatchSync } from '../utils/hybridSync';
 import { getCachedAgent, getCachedSettings, preloadCriticalData } from '../utils/fastInit';
+import { logError } from '../utils/errorHandler';
 
 // Main Dashboard Component
 export default function DashboardScreen({ navigation }) {
@@ -653,6 +655,7 @@ export default function DashboardScreen({ navigation }) {
   const headerIconColor = isDark ? '#FFFFFF' : '#111827';
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [availableUpdateInfo, setAvailableUpdateInfo] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   
   // Use shared utils/db for offline store used by sync
 
@@ -664,10 +667,72 @@ export default function DashboardScreen({ navigation }) {
     return () => subscription?.remove();
   }, []);
 
+  // Load multiplier from cache (SecureStore) first for instant display
+  const loadMultiplierFromCache = async () => {
+    try {
+      const cachedMultiplier = await SecureStore.getItemAsync('dataMultiplier');
+      if (cachedMultiplier) {
+        const multiplier = parseFloat(cachedMultiplier);
+        if (!isNaN(multiplier) && multiplier > 0) {
+          setDataMultiplier(multiplier);
+          console.log(`📊 Loaded cached multiplier: ${multiplier}x`);
+          return multiplier;
+        }
+      }
+    } catch (error) {
+      console.error('📊 Error loading multiplier from cache:', error);
+    }
+    return 1; // Default to 1x
+  };
+
+  const loadMultiplierFromServer = async () => {
+    try {
+      const token = await SecureStore.getItemAsync('token');
+      if (!token) {
+        console.log('📊 No token found, using cached multiplier');
+        return;
+      }
+
+      // console.log('📊 Attempting to load multiplier from server...');
+      const res = await axios.get(`${getBaseURL()}/api/tenants/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10000
+      });
+
+      if (res.data?.success && res.data.data?.dataMultiplier) {
+        const multiplier = res.data.data.dataMultiplier;
+        setDataMultiplier(multiplier);
+        // Cache multiplier in SecureStore for next time
+        try {
+          await SecureStore.setItemAsync('dataMultiplier', String(multiplier));
+        } catch (cacheError) {
+          console.error('📊 Error caching multiplier:', cacheError);
+        }
+        console.log(`📊 Loaded data multiplier from server: ${multiplier}x`);
+      } else {
+        console.log('📊 No multiplier setting found, using cached value');
+      }
+    } catch (error) {
+      console.error('📊 Error loading multiplier from server:', error.response?.status, error.response?.data || error.message);
+      
+      // If token is invalid, user should re-login
+      if (error.response?.status === 401) {
+        console.log('📊 Token invalid - user may need to re-login');
+        // Could optionally redirect to login here
+        // navigation.replace('Login');
+      }
+      
+      // Don't reset multiplier on error - keep cached value
+    }
+  };
+
   useEffect(() => {
     (async () => {
       try {
-        // Use fast cached data for immediate UI update
+        // Step 1: Load multiplier from cache FIRST (instant, no delay)
+        await loadMultiplierFromCache();
+        
+        // Step 2: Use fast cached data for immediate UI update
         const [cachedAgent, cachedSettings] = await Promise.all([
           getCachedAgent(),
           getCachedSettings()
@@ -691,23 +756,30 @@ export default function DashboardScreen({ navigation }) {
           }
         }
         
-        // Defer heavy database operations
+        // Step 3: Load localCount and multiplier from server in parallel (same timing)
         setTimeout(async () => {
           try {
-            // Initialize shared DB and load count
-            const count = await countVehicles();
+            // Load both in parallel
+            const [count] = await Promise.all([
+              countVehicles().catch(err => {
+                console.error('Error loading database data:', err);
+                return 0;
+              }),
+              loadMultiplierFromServer().catch(err => {
+                console.error('Error loading multiplier from server:', err);
+              })
+            ]);
+            
             setLocalCount(typeof count === 'number' ? count : 0);
             console.log(`SQLite loaded with ${count} records`);
           } catch (error) {
-            console.error('Error loading database data:', error);
+            console.error('Error loading data:', error);
           }
         }, 200);
 
-        // Defer server operations even more
+        // Step 4: Defer subscription check and other server operations
         setTimeout(async () => {
           try {
-            // Load data multiplier setting from server
-            await loadMultiplierFromServer();
             // Subscription check: if expired, redirect to Payment screen
             try {
               const token = await SecureStore.getItemAsync('token');
@@ -716,13 +788,20 @@ export default function DashboardScreen({ navigation }) {
                   headers: { Authorization: `Bearer ${token}` },
                   timeout: 8000
                 });
-                const remainingMs = res?.data?.data?.remainingMs || 0;
-                if (remainingMs <= 0) {
+                const data = res?.data?.data || {};
+                const remainingMs = typeof data.remainingMs === 'number' ? data.remainingMs : 0;
+                const status = data.status || null;
+                const graceEnd = data.gracePeriodEnd ? new Date(data.gracePeriodEnd) : null;
+                const statusAllowsAccess = status ? ['active', 'trial'].includes(status) || (status === 'grace_period' && (!graceEnd || graceEnd > new Date())) : false;
+                const hasTimeRemaining = remainingMs > 0;
+                if (!statusAllowsAccess && !hasTimeRemaining) {
                   navigation.replace('Payment');
                   return;
                 }
               }
-            } catch (_) {}
+            } catch (error) {
+              logError(error, 'DashboardScreen.subscriptionCheck', 'Failed to check subscription status');
+            }
             
             // Check for new records on app startup
             await checkForNewRecords();
@@ -751,42 +830,6 @@ export default function DashboardScreen({ navigation }) {
       }
     })();
   }, []);
-
-  const loadMultiplierFromServer = async () => {
-    try {
-      const token = await SecureStore.getItemAsync('token');
-      if (!token) {
-        console.log('📊 No token found, using default multiplier');
-        setDataMultiplier(1); // Default to 1x if no token
-        return;
-      }
-
-      // console.log('📊 Attempting to load multiplier from server...');
-      const res = await axios.get(`${getBaseURL()}/api/tenants/settings`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 10000
-      });
-
-      if (res.data?.success && res.data.data?.dataMultiplier) {
-        setDataMultiplier(res.data.data.dataMultiplier);
-        console.log(`📊 Loaded data multiplier: ${res.data.data.dataMultiplier}x`);
-      } else {
-        console.log('📊 No multiplier setting found, using default');
-        setDataMultiplier(1); // Default to 1x if no setting found
-      }
-    } catch (error) {
-      console.error('📊 Error loading multiplier from server:', error.response?.status, error.response?.data || error.message);
-      
-      // If token is invalid, user should re-login
-      if (error.response?.status === 401) {
-        console.log('📊 Token invalid - user may need to re-login');
-        // Could optionally redirect to login here
-        // navigation.replace('Login');
-      }
-      
-      setDataMultiplier(1); // Default to 1x on error
-    }
-  };
 
   const logout = async () => {
     await SecureStore.deleteItemAsync('token');
@@ -854,7 +897,9 @@ export default function DashboardScreen({ navigation }) {
         try {
           const fresh = await countVehicles();
           if (typeof fresh === 'number' && fresh >= 0) setLocalCount(fresh);
-        } catch (_) {}
+        } catch (error) {
+          logError(error, 'DashboardScreen.countVehicles', 'Failed to refresh local vehicle count');
+        }
         }
         if (!localCount || localCount <= 0) {
           Alert.alert('Offline Search', 'No local data available. Please run Sync first.');
@@ -1214,12 +1259,19 @@ export default function DashboardScreen({ navigation }) {
 
   const refreshLocalCount = async () => {
     try {
-      const count = await countVehicles();
-      setLocalCount(count);
-      console.log(`Refreshed local count: ${count}`);
+      // Refresh count and multiplier in parallel
+      const [count] = await Promise.all([
+        countVehicles().catch(err => {
+          console.error('Error refreshing count:', err);
+          return 0;
+        }),
+        loadMultiplierFromServer().catch(err => {
+          console.error('Error refreshing multiplier:', err);
+        })
+      ]);
       
-      // Reload multiplier setting from server in case it was changed
-      await loadMultiplierFromServer();
+      setLocalCount(typeof count === 'number' ? count : 0);
+      console.log(`Refreshed local count: ${count}`);
       
       // Auto-check for new records
       await checkForNewRecords();
@@ -1241,6 +1293,32 @@ export default function DashboardScreen({ navigation }) {
     } catch (error) {
       // On any error, keep sync available to the user
       setNeedsSync(true);
+    }
+  };
+
+  // Handle pull-to-refresh
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      // Refresh local count
+      await refreshLocalCount();
+      
+      // Reload agent data
+      try {
+        const cachedAgent = await getCachedAgent();
+        if (cachedAgent) setAgent(cachedAgent);
+      } catch (error) {
+        console.error('Error refreshing agent data:', error);
+      }
+      
+      // Check for new records
+      await checkForNewRecords();
+      
+      console.log('✅ Dashboard refreshed successfully');
+    } catch (error) {
+      console.error('❌ Error refreshing dashboard:', error);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -1310,179 +1388,161 @@ export default function DashboardScreen({ navigation }) {
       {/* Top bar */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => setDrawerOpen(true)} style={[styles.menuBtn, { backgroundColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.06)' }]}>
-          <Text style={[styles.menuIcon, { color: headerIconColor, fontSize: 24 }]}>≡</Text>
+          <Ionicons name="menu" size={24} color={headerIconColor} />
         </TouchableOpacity>
         <View style={styles.titleWrap}>
           <Text style={[styles.appTitle, { color: theme.textPrimary }]}>RapidRepo</Text>
         </View>
         <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-          <Text style={[styles.link, { color: headerIconColor, fontSize: 22 }]}>👤</Text>
+          <Ionicons name="person-circle-outline" size={28} color={headerIconColor} />
         </TouchableOpacity>
       </View>
 
-      {/* Brand + search */}
-      <Animated.View style={[styles.brandBlock, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
-        <View style={styles.brandBadgeWrap}>
-          <View style={styles.brandBadgeOuter}>
-            <View style={styles.brandBadgeInner}>
-              <Text style={{ fontSize: 36 }}>🚗</Text>
+      {/* Scrollable content with pull-to-refresh */}
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            colors={['#4F46E5', '#7C3AED']}
+            tintColor={isDark ? '#FFFFFF' : '#4F46E5'}
+            title="Refreshing..."
+            titleColor={isDark ? '#FFFFFF' : '#64748b'}
+          />
+        }
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Brand + search */}
+        <Animated.View style={[styles.brandBlock, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
+          <View style={styles.brandBadgeWrap}>
+            <View style={styles.brandBadgeOuter}>
+              <View style={styles.brandBadgeInner}>
+                <Image 
+                  source={require('../assets/logo.png')} 
+                  style={styles.logoInBadge}
+                  resizeMode="contain"
+                />
+              </View>
+            </View>
+            <View style={[styles.statusBadge, { borderColor: isDark ? '#0b1220' : '#e5e7eb' }]}>
+              <Text style={styles.statusBadgeText}>{isOfflineMode ? 'Offline' : 'Online'}</Text>
             </View>
           </View>
-          <View style={[styles.statusBadge, { borderColor: isDark ? '#0b1220' : '#e5e7eb' }]}>
-            <Text style={styles.statusBadgeText}>{isOfflineMode ? 'Offline' : 'Online'}</Text>
-          </View>
-        </View>
-        <Text style={[styles.orgName, { color: theme.textPrimary }]}>{agent?.tenantName || 'Your Organization'}</Text>
-        <View style={styles.searchRow}>
-          <View style={[styles.inputWrap, { flex: 0.5 }]}>
-            <TextInput
-              style={[styles.input, { paddingRight: 36, backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.textPrimary }]}
-              value={chassisValue}
-              onChangeText={(t) => {
-                const clean = String(t || '').toUpperCase().slice(0, 20);
-                setChassisValue(clean);
-              }}
-              placeholder="Chassis Number"
-              autoCapitalize="characters"
-            />
-            <Text style={styles.inputIcon}>🔍</Text>
-          </View>
-          <View style={[styles.inputWrap, { flex: 0.5 }]}>
-            <TextInput
-              style={[styles.input, { paddingRight: 36, backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.textPrimary }]}
-              value={searchValue}
-              onChangeText={(t) => {
-                const digits = String(t || '').replace(/\D/g, '').slice(0, 4);
-                setSearchValue(digits);
-              }}
-              placeholder="4-Digit Reg"
-              keyboardType="numeric"
-              maxLength={4}
-            />
-            <Text style={styles.inputIcon}>🔍</Text>
-          </View>
-        </View>
-        <Text style={[styles.searchHint, { color: theme.textSecondary }]}>
-          Enter chassis number (3+ chars) or 4-digit registration number
-        </Text>
-      </Animated.View>
-
-      {/* Stats cards */}
-      <Animated.View style={[styles.statsGrid, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
-        <View style={[styles.statCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-          <View>
-            <Text style={[styles.statLabel, { color: theme.statLabel }]}>Local Records</Text>
-            <Text style={[styles.statValue, { color: theme.textPrimary }]}>{String((localCount || 0) * dataMultiplier)}</Text>
-          </View>
-          <View style={styles.statIconBox}><Text style={{ fontSize: 18 }}>🗃️</Text></View>
-        </View>
-        <View style={[styles.statCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-          <View>
-            <Text style={[styles.statLabel, { color: theme.statLabel }]}>Sync Status</Text>
-            <Text style={[styles.statValue, { color: theme.textPrimary }]}>{isOfflineMode ? 'Offline' : 'Online'}</Text>
-          </View>
-          <View style={styles.statIconBox}><Text style={{ fontSize: 18 }}>{isOfflineMode ? '📴' : '📶'}</Text></View>
-        </View>
-      </Animated.View>
-
-      {/* Sync Progress Card - Show only when sync is in progress */}
-      {syncProgress.currentBatch > 0 && (
-        <Animated.View style={[styles.syncProgressCard, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
-          <View style={styles.syncProgressHeader}>
-            <Text style={styles.syncProgressTitle}>Sync Progress</Text>
-            <Text style={styles.syncProgressBatch}>Batch {syncProgress.currentBatch} of {syncProgress.totalBatches}</Text>
-          </View>
-          <View style={styles.syncProgressBarContainer}>
-            <View style={styles.syncProgressBar}>
-              <View 
-                style={[
-                  styles.syncProgressFill, 
-                  { width: `${(syncProgress.currentBatch / syncProgress.totalBatches) * 100}%` }
-                ]} 
+          <Text style={[styles.orgName, { color: theme.textPrimary }]}>{agent?.tenantName || 'Your Organization'}</Text>
+          <View style={styles.searchRow}>
+            <View style={[styles.inputWrap, { flex: 0.5 }]}>
+              <TextInput
+                style={[styles.input, { paddingRight: 36, backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.textPrimary }]}
+                value={chassisValue}
+                onChangeText={(t) => {
+                  const clean = String(t || '').toUpperCase().slice(0, 20);
+                  setChassisValue(clean);
+                }}
+                placeholder="Chassis Number"
+                autoCapitalize="characters"
               />
+              <Ionicons name="search" size={20} color={theme.textSecondary} style={styles.inputIcon} />
             </View>
-            <Text style={styles.syncProgressText}>
-              {syncProgress.downloadedRecords.toLocaleString()} records downloaded
-            </Text>
+            <View style={[styles.inputWrap, { flex: 0.5 }]}>
+              <TextInput
+                style={[styles.input, { paddingRight: 36, backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.textPrimary }]}
+                value={searchValue}
+                onChangeText={(t) => {
+                  const digits = String(t || '').replace(/\D/g, '').slice(0, 4);
+                  setSearchValue(digits);
+                }}
+                placeholder="4-Digit Reg"
+                keyboardType="numeric"
+                maxLength={4}
+              />
+              <Ionicons name="search" size={20} color={theme.textSecondary} style={styles.inputIcon} />
+            </View>
+          </View>
+          <Text style={[styles.searchHint, { color: theme.textSecondary, fontSize: 14, fontStyle: 'normal' }]}>
+            Enter chassis number (3+ chars) or 4-digit registration number
+          </Text>
+        </Animated.View>
+
+        {/* Stats cards */}
+        <Animated.View style={[styles.statsGrid, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
+          <View style={[styles.statCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+            <View>
+              <Text style={[styles.statLabel, { color: theme.statLabel }]}>Local Records</Text>
+              <Text style={[styles.statValue, { color: theme.textPrimary }]}>{String((localCount || 0) * dataMultiplier)}</Text>
+            </View>
+            <View style={[styles.statIconBox, { backgroundColor: isDark ? 'rgba(59,130,246,0.2)' : 'rgba(59,130,246,0.1)' }]}><MaterialCommunityIcons name="database" size={20} color={isDark ? '#9ecbff' : '#3b82f6'} /></View>
+          </View>
+          <View style={[styles.statCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+            <View>
+              <Text style={[styles.statLabel, { color: theme.statLabel }]}>Sync Status</Text>
+              <Text style={[styles.statValue, { color: theme.textPrimary }]}>{isOfflineMode ? 'Offline' : 'Online'}</Text>
+            </View>
+            <View style={[styles.statIconBox, { backgroundColor: isOfflineMode ? 'rgba(16,185,129,0.2)' : 'rgba(59,130,246,0.2)' }]}><MaterialCommunityIcons name={isOfflineMode ? 'cloud-off-outline' : 'cloud-sync-outline'} size={20} color={isOfflineMode ? '#10B981' : '#3b82f6'} /></View>
           </View>
         </Animated.View>
-      )}
 
-      {/* Progress Bar - Hidden when overlay is shown */}
-      {downloading && !showLoadingOverlay && (
-        <ProgressBar progress={downloadProgress || 0} status={downloadStatus || ''} />
-      )}
-
-      {/* Info cards removed to keep dashboard minimal */}
-
-      
-
-      {/* Quick Actions */}
-      <Animated.View style={[styles.grid, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
-        <LinearGradient colors={["#F97316", "#EF4444"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.tileGradient}>
-          <TouchableOpacity style={styles.tileContent}>
-            <View>
-              <Text style={styles.tileTitle}>Holds</Text>
-              <Text style={styles.tileSubtitle}>Manage holds</Text>
+        {/* Sync Progress Card - Show only when sync is in progress */}
+        {syncProgress.currentBatch > 0 && (
+          <Animated.View style={[styles.syncProgressCard, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
+            <View style={styles.syncProgressHeader}>
+              <Text style={styles.syncProgressTitle}>Sync Progress</Text>
+              <Text style={styles.syncProgressBatch}>Batch {syncProgress.currentBatch} of {syncProgress.totalBatches}</Text>
             </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={styles.tileIcon}>⏸️</Text>
-              <Text style={styles.chev}>›</Text>
+            <View style={styles.syncProgressBarContainer}>
+              <View style={styles.syncProgressBar}>
+                <View 
+                  style={[
+                    styles.syncProgressFill, 
+                    { width: `${(syncProgress.currentBatch / syncProgress.totalBatches) * 100}%` }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.syncProgressText}>
+                {syncProgress.downloadedRecords.toLocaleString()} records downloaded
+              </Text>
             </View>
-          </TouchableOpacity>
-        </LinearGradient>
-        <LinearGradient colors={["#A855F7", "#4F46E5"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.tileGradient}>
-          <TouchableOpacity style={styles.tileContent}>
-            <View>
-              <Text style={styles.tileTitle}>In Yard</Text>
-              <Text style={styles.tileSubtitle}>Yard inventory</Text>
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={styles.tileIcon}>📦</Text>
-              <Text style={styles.chev}>›</Text>
-            </View>
-          </TouchableOpacity>
-        </LinearGradient>
-      </Animated.View>
-      
+          </Animated.View>
+        )}
 
-      {/* Bottom bar with offline/online toggle and sync */}
-      {/* <View style={styles.bottomBar}>
-        <View style={styles.modeGroup}>
-          <TouchableOpacity
-            style={[styles.modeBtn, isOfflineMode && styles.modeBtnActive]}
-            onPress={() => setIsOfflineMode(true)}
-          >
-            <Text style={[styles.modeBtnText, isOfflineMode && styles.modeBtnTextActive]}>Offline Mode</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modeBtn, !isOfflineMode && styles.modeBtnActive]}
-            onPress={() => setIsOfflineMode(false)}
-          >
-            <Text style={[styles.modeBtnText, !isOfflineMode && styles.modeBtnTextActive]}>Online Mode</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.downloadButtonsContainer}>
-          <LinearGradient colors={["#10B981", "#059669"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.actionBtnGradient, downloading && { opacity: 0.7 }]}>
-            <TouchableOpacity
-              style={styles.actionBtn}
-              onPress={syncViaJsonDump}
-              disabled={downloading}
-            >
-              <Text style={styles.bottomButtonText}>{downloading ? '⏳ Syncing...' : '✅ Sync Data'}</Text>
+        {/* Progress Bar - Hidden when overlay is shown */}
+        {downloading && !showLoadingOverlay && (
+          <ProgressBar progress={downloadProgress || 0} status={downloadStatus || ''} />
+        )}
+
+        {/* Info cards removed to keep dashboard minimal */}
+
+        
+
+        {/* Quick Actions */}
+        <Animated.View style={[styles.grid, { opacity: contentFade, transform: [{ translateY: contentSlide }] }]}>
+          <LinearGradient colors={["#F97316", "#EF4444"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.tileGradient}>
+            <TouchableOpacity style={styles.tileContent}>
+              <View>
+                <Text style={styles.tileTitle}>Holds</Text>
+                <Text style={styles.tileSubtitle}>Manage holds</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <MaterialCommunityIcons name="pause-circle" size={24} color="#fff" style={styles.tileIcon} />
+                <Ionicons name="chevron-forward" size={26} color="#fff" />
+              </View>
             </TouchableOpacity>
           </LinearGradient>
-          <LinearGradient colors={["#3B82F6", "#4F46E5"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.actionBtnGradient}>
-            <TouchableOpacity
-              style={styles.actionBtn}
-              onPress={refreshLocalCount}
-            >
-              <Text style={styles.bottomButtonText}>🔄 Refresh</Text>
+          <LinearGradient colors={["#A855F7", "#4F46E5"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.tileGradient}>
+            <TouchableOpacity style={styles.tileContent}>
+              <View>
+                <Text style={styles.tileTitle}>In Yard</Text>
+                <Text style={styles.tileSubtitle}>Yard inventory</Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <MaterialCommunityIcons name="warehouse" size={24} color="#fff" style={styles.tileIcon} />
+                <Ionicons name="chevron-forward" size={26} color="#fff" />
+              </View>
             </TouchableOpacity>
           </LinearGradient>
-        </View>
-      </View> */}
-
+        </Animated.View>
+      </ScrollView>
 
       {/* Bottom bar with improved layout */}
       <View style={[styles.bottomBar, { backgroundColor: theme.bottomBarBg, borderTopColor: theme.bottomBarBorder, paddingBottom: insets.bottom + 12 }]}>
@@ -1495,7 +1555,7 @@ export default function DashboardScreen({ navigation }) {
               onPress={() => setIsOfflineMode(true)}
             >
               <View style={styles.modeToggleContent}>
-                <Text style={styles.modeToggleIcon}>📴</Text>
+                <MaterialCommunityIcons name="cloud-off-outline" size={20} color={isOfflineMode ? '#111827' : theme.modeToggleText} style={styles.modeToggleIcon} />
                 <Text style={[styles.modeToggleText, { color: isOfflineMode ? '#111827' : theme.modeToggleText }]}>
                   Offline
                 </Text>
@@ -1506,7 +1566,7 @@ export default function DashboardScreen({ navigation }) {
               onPress={() => setIsOfflineMode(false)}
             >
               <View style={styles.modeToggleContent}>
-                <Text style={styles.modeToggleIcon}>📶</Text>
+                <MaterialCommunityIcons name="cloud-sync-outline" size={20} color={!isOfflineMode ? '#111827' : theme.modeToggleText} style={styles.modeToggleIcon} />
                 <Text style={[styles.modeToggleText, { color: !isOfflineMode ? '#111827' : theme.modeToggleText }]}>
                   Online
                 </Text>
@@ -1515,7 +1575,14 @@ export default function DashboardScreen({ navigation }) {
           </View>
         </View>
 
-        {/* Action Buttons Section removed (handled by Bulk Download screen) */}
+        {/* Smart Sync Button */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('BulkDownload')}
+          style={styles.smartSyncBtn}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.smartSyncText}>Smart Sync</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Loading Overlay */}
@@ -1574,20 +1641,25 @@ export default function DashboardScreen({ navigation }) {
             </View>
             <Text style={[styles.drawerTitle, { color: theme.drawerMuted }]}>Menu</Text>
             <TouchableOpacity style={[styles.drawerItem, { backgroundColor: 'transparent' }]} onPress={() => { setDrawerOpen(false); }}>
-              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>🏠  Dashboard</Text>
+              <Ionicons name="home-outline" size={20} color={theme.drawerText} style={{ marginRight: 10 }} />
+            <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>Dashboard</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.drawerItem, { backgroundColor: 'transparent' }]} onPress={() => { setDrawerOpen(false); navigation.navigate('IDCard'); }}>
-              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>🆔  My ID Card</Text>
+              <Ionicons name="id-card-outline" size={20} color={theme.drawerText} style={{ marginRight: 10 }} />
+              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>My ID Card</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.drawerItem, { backgroundColor: 'transparent' }]} onPress={() => { setDrawerOpen(false); navigation.navigate('BulkDownload'); }}>
-              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>⬇️  Bulk Offline Download</Text>
+              <Ionicons name="cloud-download-outline" size={20} color={theme.drawerText} style={{ marginRight: 10 }} />
+              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>Bulk Offline Download</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.drawerItem, { backgroundColor: 'transparent' }]} onPress={() => { setDrawerOpen(false); navigation.navigate('Settings'); }}>
-              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>⚙️  Settings</Text>
+              <Ionicons name="settings-outline" size={20} color={theme.drawerText} style={{ marginRight: 10 }} />
+              <Text style={[styles.drawerItemText, { color: theme.drawerText }]}>Settings</Text>
             </TouchableOpacity>
             <View style={[styles.drawerDivider, { backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#F3F4F6' }]} />
             <TouchableOpacity style={[styles.drawerItem, { backgroundColor: isDark ? 'rgba(239,68,68,0.12)' : '#FEF2F2' }]} onPress={logout}>
-              <Text style={[styles.drawerItemText, { color: isDark ? '#FCA5A5' : '#B91C1C' }]}>🚪  Logout</Text>
+              <Ionicons name="log-out-outline" size={20} color={isDark ? '#FCA5A5' : '#B91C1C'} style={{ marginRight: 10 }} />
+              <Text style={[styles.drawerItemText, { color: isDark ? '#FCA5A5' : '#B91C1C' }]}>Logout</Text>
             </TouchableOpacity>
           </Animated.View>
           <TouchableOpacity style={{ flex: 1 }} onPress={() => setDrawerOpen(false)} />
@@ -1608,9 +1680,13 @@ const styles = StyleSheet.create({
   brandBlock: { alignItems: 'center', marginBottom: 14 },
   brandBadgeWrap: { width: 112, height: 112, marginTop: 2 },
   brandBadgeOuter: { flex: 1, borderRadius: 28, padding: 4, backgroundColor: 'rgba(59,130,246,0.5)' },
-  brandBadgeInner: { flex: 1, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.95)', alignItems: 'center', justifyContent: 'center' },
+  brandBadgeInner: { flex: 1, borderRadius: 24, backgroundColor: 'transparent', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   statusBadge: { position: 'absolute', right: -6, bottom: -6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: '#10B981', borderWidth: 3, borderColor: '#0b1220' },
   statusBadgeText: { color: '#fff', fontWeight: '800', fontSize: 10, textTransform: 'uppercase' },
+  logoInBadge: {
+    width: 110,
+    height: 110,
+  },
   orgName: { color: '#fff', fontSize: 22, fontWeight: '900', marginTop: 10 },
   searchRow: { flexDirection: 'row', gap: 8, width: '100%', marginTop: 12 },
   inputWrap: { position: 'relative' },
@@ -1747,85 +1823,19 @@ const styles = StyleSheet.create({
   tileIcon: { fontSize: 24, color: '#fff', marginRight: 6 },
   chev: { color: '#fff', fontSize: 26, marginLeft: 6 },
   muted: { color: '#666', fontSize: 12 },
-  bottomBar: { 
-    // position: 'absolute', 
-    // bottom: 12, 
-    // left: 16, 
-    // right: 16, 
-    // flexDirection: 'row', 
-    // alignItems: 'center', 
-    // gap: 12 
-
-    position: 'absolute', 
-    bottom: 0, 
-    left: 0, 
-    right: 0, 
+  bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
     backgroundColor: 'rgba(17, 24, 39, 0.95)',
-    backdropFilter: 'blur(20px)',
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 12
   },
-   modeSection: {
-    marginBottom: 16
-  },
-    modeSectionTitle: {
-    color: '#9CA3AF',
-    fontSize: 12,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 8,
-    textAlign: 'center'
-  },
-    modeToggleContainer: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(31, 41, 55, 0.8)',
-    borderRadius: 16,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)'
-  },
-      modeToggleBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    transition: 'all 0.2s ease'
-  },
-    modeToggleBtnActive: {
-    backgroundColor: '#FACC15',
-    shadowColor: '#FACC15',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 3
-  },
-    modeToggleContent: {
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  
-  bottomBar: { 
-    position: 'absolute', 
-    bottom: 0, 
-    left: 0, 
-    right: 0, 
-    backgroundColor: 'rgba(17, 24, 39, 0.95)',
-    backdropFilter: 'blur(20px)',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-    paddingHorizontal: 16,
-    paddingTop: 16
-  },
-  
-  // Mode Toggle Section
   modeSection: {
-    marginBottom: 16
+    marginBottom: 16,
   },
   modeSectionTitle: {
     color: '#9CA3AF',
@@ -1834,7 +1844,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 8,
-    textAlign: 'center'
+    textAlign: 'center',
   },
   modeToggleContainer: {
     flexDirection: 'row',
@@ -1842,7 +1852,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 4,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)'
+    borderColor: 'rgba(255, 255, 255, 0.1)',
   },
   modeToggleBtn: {
     flex: 1,
@@ -1851,7 +1861,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    transition: 'all 0.2s ease'
   },
   modeToggleBtnActive: {
     backgroundColor: '#FACC15',
@@ -1859,30 +1868,25 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 4,
-    elevation: 3
+    elevation: 3,
   },
   modeToggleContent: {
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
   },
   modeToggleIcon: {
     fontSize: 16,
-    marginBottom: 4
+    marginBottom: 4,
   },
   modeToggleText: {
     color: '#9CA3AF',
     fontSize: 13,
     fontWeight: '700',
-    letterSpacing: 0.5
+    letterSpacing: 0.5,
   },
   modeToggleTextActive: {
-    color: '#111827'
+    color: '#111827',
   },
-
-
-
-
-
   modeGroup: { flex: 1, flexDirection: 'row', gap: 12 },
   modeBtn: {
     flex: 1,
@@ -1910,63 +1914,21 @@ const styles = StyleSheet.create({
 
 
 
-
-
-
-    // Action Buttons Section
-  actionSection: {
-    flexDirection: 'row',
-    gap: 12
-  },
-  fullWidthActionGradient: {
-    flex: 1,
-    borderRadius: 16,
-    shadowColor: '#10B981',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6
-  },
-  fullWidthActionBtn: {
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-
-    actionBtnContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12
-  },
-
-    actionBtnIcon: {
-    fontSize: 20
-  },
-
-    actionBtnTextContainer: {
-    alignItems: 'flex-start'
-  },
-
-    actionBtnTitle: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0.3
-  },
-
-    actionBtnSubtitle: {
-    color: 'rgba(255, 255, 255, 0.8)',
-    fontSize: 9,
-    fontWeight: '500',
-    marginTop: 1
-  },
-  
-  
   actionBtnGradient: { flex: 1, borderRadius: 24 },
   actionBtn: { paddingVertical: 18, paddingHorizontal: 18, alignItems: 'center' },
   bottomButtonText: { color: '#fff', fontWeight: '900', letterSpacing: 1 },
+  smartSyncBtn: {
+    width: '100%',
+    backgroundColor: '#2563EB',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  smartSyncText: {
+    color: '#fff',
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
   drawerOverlay: { flex: 1, flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.4)' },
   drawer: { width: 280, backgroundColor: '#ffffff', paddingTop: 40, paddingHorizontal: 16, borderTopRightRadius: 16, borderBottomRightRadius: 16 },
   drawerHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
@@ -2090,5 +2052,11 @@ const styles = StyleSheet.create({
     color: '#1D4ED8',
     fontSize: 12,
     fontWeight: '500',
-  }
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingBottom: 200, // Add padding to account for bottom bar
+  },
 });

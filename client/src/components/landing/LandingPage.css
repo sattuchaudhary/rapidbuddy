@@ -1,11 +1,13 @@
 /* Modern Landing Page Styles */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap');
+
 .landing-page {
-  font-family: 'Inter', 'Roboto', 'Helvetica', 'Arial', sans-serif;
-  line-height: 1.5;
+  font-family: 'Poppins', 'Inter', 'Roboto', 'Helvetica', 'Arial', sans-serif;
+  line-height: 1.6;
   color: #1e293b;
   overflow-x: hidden;
   background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-  font-size: 14px;
+  font-size: 16px; /* Increased base font size for better readability */
 }
 
 /* Modern Header Styles */
@@ -211,6 +213,13 @@
 }
 
 /* Modern About Section */
+.landing-page section {
+  animation: fadeInUp 0.8s ease-out forwards;
+  opacity: 0;
+  /* Delay animations for subsequent sections */
+  animation-delay: var(--animation-delay, 0s);
+}
+
 .about {
   padding: 6rem 0;
   background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
@@ -224,12 +233,14 @@
 
 .section-title {
   text-align: center;
-  font-size: 2rem;
+  font-size: 2.2rem; /* Slightly increased font size for impact */
   font-weight: 700;
   color: #1e293b;
-  margin-bottom: 2rem;
+  margin-bottom: 2.5rem; /* Increased margin for better spacing */
   position: relative;
   letter-spacing: -0.025em;
+  animation: fadeInUp 0.8s ease-out forwards; /* Added animation */
+  opacity: 0; /* Start hidden for animation */
 }
 
 .section-title::after {
@@ -1077,6 +1088,17 @@
   .form-row {
     grid-template-columns: 1fr;
     gap: 1rem;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

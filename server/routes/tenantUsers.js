@@ -2,8 +2,11 @@ const express = require('express');
 const { body } = require('express-validator');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
-const { authenticateUnifiedToken, requireAdmin } = require('../middleware/unifiedAuth');
+const { authenticateUnifiedToken, requireAdmin, requireTenantUserManagementAccess } = require('../middleware/unifiedAuth');
 const mongoose = require('mongoose');
 const Tenant = require('../models/Tenant');
 // Use centralized helper which preserves credentials and query string (authSource)
@@ -81,6 +84,12 @@ router.post('/agents/login', async (req, res) => {
 
     if (agent.status !== 'active') {
       return res.status(403).json({ success: false, message: 'Account is not active' });
+    }
+
+    // Clear forceLogoutAt on successful login
+    if (agent.forceLogoutAt) {
+      agent.forceLogoutAt = null;
+      await agent.save();
     }
 
     const token = jwt.sign({
@@ -197,6 +206,50 @@ router.post('/staff/login', async (req, res) => {
   }
 });
 
+// Check force logout status for current user
+router.get('/check-force-logout', authenticateUnifiedToken, async (req, res) => {
+  try {
+    if (req.user.userType !== 'repo_agent') {
+      return res.json({ success: true, forceLogout: false });
+    }
+
+    const tenant = await Tenant.findById(req.user.tenantId);
+    if (!tenant) {
+      return res.json({ success: true, forceLogout: false });
+    }
+
+    const tenantConnection = await getTenantDB(tenant.name);
+    const RepoAgent = getRepoAgentModel(tenantConnection);
+    
+    // Try to find agent by MongoDB _id first, then by numeric agentId
+    let agent = null;
+    const mongoose = require('mongoose');
+    
+    const objectIdToTry = req.user.userId;
+    if (objectIdToTry && mongoose.Types.ObjectId.isValid(objectIdToTry)) {
+      agent = await RepoAgent.findById(objectIdToTry).select('forceLogoutAt');
+    }
+    
+    if (!agent && req.user.agentId && typeof req.user.agentId === 'number') {
+      agent = await RepoAgent.findOne({ agentId: req.user.agentId }).select('forceLogoutAt');
+    }
+    
+    if (agent && agent.forceLogoutAt) {
+      return res.json({
+        success: true,
+        forceLogout: true,
+        message: 'You have been logged out by administrator. Please login again.',
+        forceLogoutAt: agent.forceLogoutAt
+      });
+    }
+
+    return res.json({ success: true, forceLogout: false });
+  } catch (error) {
+    console.error('Error checking force logout:', error);
+    return res.json({ success: true, forceLogout: false });
+  }
+});
+
 // Authenticated (non-admin): return current mobile user's profile with human-readable codes
 router.get('/me', authenticateUnifiedToken, async (req, res) => {
   try {
@@ -250,11 +303,33 @@ router.get('/me', authenticateUnifiedToken, async (req, res) => {
   }
 });
 
-// All routes below require authentication and admin role
-router.use(authenticateUnifiedToken, requireAdmin);
+// Multer setup for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = path.join(__dirname, '..', 'uploads');
+    // Create uploads directory if it doesn't exist
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
 
-// Test endpoint to check tenant database connection
-router.get('/test-connection', async (req, res) => {
+const upload = multer({ storage: storage }).fields([
+  { name: 'profilePhoto', maxCount: 1 },
+  { name: 'aadharCardFront', maxCount: 1 },
+  { name: 'aadharCardBack', maxCount: 1 },
+  { name: 'panCardPhoto', maxCount: 1 },
+  { name: 'policeVerification', maxCount: 1 },
+  { name: 'draCertificate', maxCount: 1 }
+]);
+
+// Test endpoint to check tenant database connection (requires authentication, but not necessarily admin)
+router.get('/test-connection', authenticateUnifiedToken, async (req, res) => {
   try {
     console.log('Testing tenant database connection...');
     console.log('User:', req.user.userId);
@@ -420,7 +495,8 @@ const getOfficeStaffModel = (tenantConnection) => {
     password: {
       type: String,
       required: [true, 'Password is required'],
-      minlength: [6, 'Password must be at least 6 characters']
+      minlength: [6, 'Password must be at least 6 characters'],
+      select: false // Don't include password in queries by default for security
     },
     panCardNo: {
       type: String,
@@ -581,7 +657,8 @@ const getRepoAgentModel = (tenantConnection) => {
     password: {
       type: String,
       required: [true, 'Password is required'],
-      minlength: [6, 'Password must be at least 6 characters']
+      minlength: [6, 'Password must be at least 6 characters'],
+      select: false // Don't include password in queries by default for security
     },
     panCardNo: {
       type: String,
@@ -614,6 +691,12 @@ const getRepoAgentModel = (tenantConnection) => {
     otpVerified: {
       type: Boolean,
       default: false
+    },
+    
+    // Force logout from mobile app
+    forceLogoutAt: {
+      type: Date,
+      default: null
     },
     
     // Created by
@@ -671,10 +754,10 @@ const getRepoAgentModel = (tenantConnection) => {
 };
 
 // Office Staff Management
-router.get('/staff', async (req, res) => {
+router.get('/staff', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '' } = req.query;
-    const skip = (page - 1) * limit;
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
     
     console.log('Fetching office staff for user:', req.user.userId);
     console.log('User tenant ID:', req.user.tenantId);
@@ -747,9 +830,10 @@ router.get('/staff', async (req, res) => {
  });
 
 // Create new office staff
-router.post('/staff', async (req, res) => {
+router.post('/staff', authenticateUnifiedToken, requireTenantUserManagementAccess, upload, async (req, res) => {
   try {
     console.log('Creating new office staff with data:', req.body);
+    console.log('Uploaded files:', req.files);
     
     // Validate required fields
     const { name, email, phoneNumber, role, address, city, state, zipCode, password } = req.body;
@@ -808,13 +892,13 @@ router.post('/staff', async (req, res) => {
       password,
       panCardNo: req.body.panCardNo || '',
       aadhaarNumber: req.body.aadhaarNumber || '',
-      // File paths will be added when file upload is implemented
-      aadharCardFront: req.body.aadharCardFront || '',
-      aadharCardBack: req.body.aadharCardBack || '',
-      policeVerification: req.body.policeVerification || '',
-      panCardPhoto: req.body.panCardPhoto || '',
-      draCertificate: req.body.draCertificate || '',
-      profilePhoto: req.body.profilePhoto || '',
+      // File paths from multer upload
+      aadharCardFront: req.files?.aadharCardFront?.[0]?.path || '',
+      aadharCardBack: req.files?.aadharCardBack?.[0]?.path || '',
+      policeVerification: req.files?.policeVerification?.[0]?.path || '',
+      panCardPhoto: req.files?.panCardPhoto?.[0]?.path || '',
+      draCertificate: req.files?.draCertificate?.[0]?.path || '',
+      profilePhoto: req.files?.profilePhoto?.[0]?.path || '',
       createdBy: req.user.userId.toString(),
       status: 'active',
       otpVerified: false
@@ -864,7 +948,7 @@ router.post('/staff', async (req, res) => {
 });
 
 // Get single office staff by id
-router.get('/staff/:id', async (req, res) => {
+router.get('/staff/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -886,7 +970,7 @@ router.get('/staff/:id', async (req, res) => {
 });
 
 // Update office staff by id
-router.put('/staff/:id', async (req, res) => {
+router.put('/staff/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -912,7 +996,7 @@ router.put('/staff/:id', async (req, res) => {
 });
 
 // Update office staff status
-router.put('/staff/:id/status', async (req, res) => {
+router.put('/staff/:id/status', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { status } = req.body;
     if (!['active', 'inactive'].includes(status)) {
@@ -931,8 +1015,44 @@ router.put('/staff/:id/status', async (req, res) => {
   }
 });
 
+// Reset password for office staff
+router.put('/staff/:id/reset-password', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Password is required and must be at least 6 characters' 
+      });
+    }
+
+    const tenant = await Tenant.findById(req.user.tenantId);
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant not found' });
+    }
+    
+    const tenantConnection = await getTenantDB(tenant.name);
+    const OfficeStaff = getOfficeStaffModel(tenantConnection);
+
+    const staff = await OfficeStaff.findById(req.params.id);
+    if (!staff) {
+      return res.status(404).json({ success: false, message: 'Staff not found' });
+    }
+
+    // Update password (will be hashed by pre-save hook)
+    staff.password = newPassword;
+    await staff.save();
+
+    return res.json({ success: true, message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Error resetting password for office staff:', error);
+    return res.status(500).json({ success: false, message: 'Failed to reset password' });
+  }
+});
+
 // Delete office staff by id
-router.delete('/staff/:id', async (req, res) => {
+router.delete('/staff/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -956,10 +1076,10 @@ router.delete('/staff/:id', async (req, res) => {
 });
 
 // Repo Agent Management
-router.get('/agents', async (req, res) => {
+router.get('/agents', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '' } = req.query;
-    const skip = (page - 1) * limit;
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
     
     console.log('Fetching repo agents for user:', req.user.userId);
     console.log('User tenant ID:', req.user.tenantId);
@@ -1032,7 +1152,7 @@ router.get('/agents', async (req, res) => {
 });
 
 // Aggregated stats: number of vehicles searched per agent (from mobile search history)
-router.get('/agents/stats/search', async (req, res) => {
+router.get('/agents/stats/search', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { dateStart = '', dateEnd = '' } = req.query;
 
@@ -1182,7 +1302,7 @@ router.get('/agents/stats/search', async (req, res) => {
 });
 
 // Get single repo agent by id
-router.get('/agents/:id', async (req, res) => {
+router.get('/agents/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -1204,7 +1324,7 @@ router.get('/agents/:id', async (req, res) => {
 });
 
 // Update repo agent by id
-router.put('/agents/:id', async (req, res) => {
+router.put('/agents/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -1230,7 +1350,7 @@ router.put('/agents/:id', async (req, res) => {
 });
 
 // Update repo agent status
-router.put('/agents/:id/status', async (req, res) => {
+router.put('/agents/:id/status', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { status } = req.body;
     if (!['active', 'inactive'].includes(status)) {
@@ -1249,8 +1369,44 @@ router.put('/agents/:id/status', async (req, res) => {
   }
 });
 
+// Reset password for repo agent
+router.put('/agents/:id/reset-password', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Password is required and must be at least 6 characters' 
+      });
+    }
+
+    const tenant = await Tenant.findById(req.user.tenantId);
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant not found' });
+    }
+    
+    const tenantConnection = await getTenantDB(tenant.name);
+    const RepoAgent = getRepoAgentModel(tenantConnection);
+
+    const agent = await RepoAgent.findById(req.params.id);
+    if (!agent) {
+      return res.status(404).json({ success: false, message: 'Agent not found' });
+    }
+
+    // Update password (will be hashed by pre-save hook)
+    agent.password = newPassword;
+    await agent.save();
+
+    return res.json({ success: true, message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Error resetting password for repo agent:', error);
+    return res.status(500).json({ success: false, message: 'Failed to reset password' });
+  }
+});
+
 // Delete repo agent by id
-router.delete('/agents/:id', async (req, res) => {
+router.delete('/agents/:id', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const tenant = await Tenant.findById(req.user.tenantId);
     if (!tenant) {
@@ -1273,10 +1429,42 @@ router.delete('/agents/:id', async (req, res) => {
   }
 });
 
+// Force logout repo agent from mobile app
+router.post('/agents/:id/mobile-logout', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
+  try {
+    const tenant = await Tenant.findById(req.user.tenantId);
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant not found' });
+    }
+    const tenantConnection = await getTenantDB(tenant.name);
+    const RepoAgent = getRepoAgentModel(tenantConnection);
+
+    const agent = await RepoAgent.findByIdAndUpdate(
+      req.params.id,
+      { $set: { forceLogoutAt: new Date() } },
+      { new: true }
+    );
+
+    if (!agent) {
+      return res.status(404).json({ success: false, message: 'Agent not found' });
+    }
+
+    return res.json({ 
+      success: true, 
+      message: 'Repo agent will be logged out from mobile app on next API call',
+      data: { forceLogoutAt: agent.forceLogoutAt }
+    });
+  } catch (error) {
+    console.error('Error forcing mobile logout:', error);
+    return res.status(500).json({ success: false, message: 'Failed to force mobile logout' });
+  }
+});
+
 // Create new repo agent
-router.post('/agents', async (req, res) => {
+router.post('/agents', authenticateUnifiedToken, upload, async (req, res) => {
   try {
     console.log('Creating new repo agent with data:', req.body);
+    console.log('Uploaded files:', req.files);
     
     // Validate required fields
     const { name, email, phoneNumber, address, city, state, zipCode, password } = req.body;
@@ -1339,13 +1527,13 @@ router.post('/agents', async (req, res) => {
       password,
       panCardNo: req.body.panCardNo || '',
       aadhaarNumber: req.body.aadhaarNumber || '',
-      // File paths will be added when file upload is implemented
-      aadharCardFront: req.body.aadharCardFront || '',
-      aadharCardBack: req.body.aadharCardBack || '',
-      policeVerification: req.body.policeVerification || '',
-      panCardPhoto: req.body.panCardPhoto || '',
-      draCertificate: req.body.draCertificate || '',
-      profilePhoto: req.body.profilePhoto || '',
+      // File paths from multer upload
+      aadharCardFront: req.files?.aadharCardFront?.[0]?.path || '',
+      aadharCardBack: req.files?.aadharCardBack?.[0]?.path || '',
+      policeVerification: req.files?.policeVerification?.[0]?.path || '',
+      panCardPhoto: req.files?.panCardPhoto?.[0]?.path || '',
+      draCertificate: req.files?.draCertificate?.[0]?.path || '',
+      profilePhoto: req.files?.profilePhoto?.[0]?.path || '',
       role: 'Repo Agent',
       createdBy: req.user.userId.toString(),
       status: 'active',
@@ -1353,9 +1541,12 @@ router.post('/agents', async (req, res) => {
     });
 
     // Save to tenant-specific database
+    // Password will be hashed by pre-save hook
     const savedAgent = await newAgent.save();
     
     console.log(`Repo agent saved to tenant database ${tenant.name}:`, savedAgent._id);
+    console.log(`Repo agent password hashed:`, savedAgent.password ? (savedAgent.password.startsWith('$2b$') ? 'Yes (bcrypt)' : 'No (plaintext)') : 'Missing');
+    console.log(`Repo agent password length:`, savedAgent.password ? savedAgent.password.length : 0);
 
     res.status(201).json({
       success: true,
@@ -1395,7 +1586,7 @@ router.post('/agents', async (req, res) => {
 });
 
 // Pending Approvals
-router.get('/pending', async (req, res) => {
+router.get('/pending', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     // For now, return sample data
     // TODO: Implement actual database queries
@@ -1434,7 +1625,7 @@ router.get('/pending', async (req, res) => {
 });
 
 // Update user status (for repo agents)
-router.put('/:id/status', async (req, res) => {
+router.put('/:id/status', authenticateUnifiedToken, requireTenantUserManagementAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;

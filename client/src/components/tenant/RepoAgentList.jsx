@@ -39,7 +39,9 @@ import {
   Refresh as RefreshIcon,
   Search as SearchIcon,
   Map as MapIcon,
-  TrackChanges as TrackIcon
+  TrackChanges as TrackIcon,
+  PhoneAndroid as PhoneAndroidIcon,
+  LockReset as LockResetIcon
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import FormControlLabel from '@mui/material/FormControlLabel';
@@ -83,6 +85,15 @@ const RepoAgentList = () => {
   });
   const [formErrors, setFormErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+
+  // Password Reset Dialog
+  const [openPasswordResetDialog, setOpenPasswordResetDialog] = useState(false);
+  const [passwordResetAgentId, setPasswordResetAgentId] = useState(null);
+  const [passwordResetData, setPasswordResetData] = useState({
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [passwordResetErrors, setPasswordResetErrors] = useState({});
 
   // Ref for auto-focusing first input field
   const nameInputRef = useRef(null);
@@ -247,6 +258,83 @@ const RepoAgentList = () => {
     } catch (error) {
       console.error('Error deleting repo agent:', error);
       setError(error.response?.data?.message || 'Failed to delete repo agent');
+    }
+  };
+
+  const handleMobileLogout = async (agentId) => {
+    if (!window.confirm('Are you sure you want to logout this repo agent from mobile app?')) return;
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(`/api/tenant/users/agents/${agentId}/mobile-logout`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (response.data.success) {
+        setSuccess('Repo agent will be logged out from mobile app on next API call');
+        setTimeout(() => setSuccess(''), 3000);
+      }
+    } catch (error) {
+      console.error('Error logging out repo agent from mobile:', error);
+      setError(error.response?.data?.message || 'Failed to logout repo agent from mobile app');
+    }
+  };
+
+  const handleOpenPasswordResetDialog = (agentId) => {
+    setPasswordResetAgentId(agentId);
+    setPasswordResetData({ newPassword: '', confirmPassword: '' });
+    setPasswordResetErrors({});
+    setOpenPasswordResetDialog(true);
+  };
+
+  const handleClosePasswordResetDialog = () => {
+    setOpenPasswordResetDialog(false);
+    setPasswordResetAgentId(null);
+    setPasswordResetData({ newPassword: '', confirmPassword: '' });
+    setPasswordResetErrors({});
+  };
+
+  const handlePasswordResetInputChange = (e) => {
+    const { name, value } = e.target;
+    setPasswordResetData(prev => ({ ...prev, [name]: value }));
+    if (passwordResetErrors[name]) {
+      setPasswordResetErrors(prev => ({ ...prev, [name]: '' }));
+    }
+  };
+
+  const validatePasswordReset = () => {
+    const errors = {};
+    if (!passwordResetData.newPassword) {
+      errors.newPassword = 'Password is required';
+    } else if (passwordResetData.newPassword.length < 6) {
+      errors.newPassword = 'Password must be at least 6 characters';
+    }
+    if (!passwordResetData.confirmPassword) {
+      errors.confirmPassword = 'Please confirm password';
+    } else if (passwordResetData.newPassword !== passwordResetData.confirmPassword) {
+      errors.confirmPassword = 'Passwords do not match';
+    }
+    setPasswordResetErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handlePasswordReset = async () => {
+    if (!validatePasswordReset()) return;
+    
+    try {
+      setLoading(true);
+      const token = localStorage.getItem('token');
+      await axios.put(`/api/tenant/users/agents/${passwordResetAgentId}/reset-password`, {
+        newPassword: passwordResetData.newPassword
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setSuccess('Password reset successfully');
+      handleClosePasswordResetDialog();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (error) {
+      console.error('Error resetting password:', error);
+      setError(error.response?.data?.message || 'Failed to reset password');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -479,7 +567,7 @@ const RepoAgentList = () => {
         <Button
           variant="contained"
           startIcon={<AddIcon />}
-          onClick={handleOpenAddDialog}
+          onClick={() => navigate('/app/tenant/users/agents/register')}
           sx={{ 
             borderRadius: 2,
             bgcolor: '#424242',
@@ -678,8 +766,21 @@ const RepoAgentList = () => {
                         >
                           {agent.status === 'active' ? <PauseIcon /> : <PlayIcon />}
                         </IconButton>
-                        <IconButton size="small" color="primary">
-                          <MapIcon />
+                        <IconButton 
+                          size="small" 
+                          color="warning" 
+                          onClick={() => handleOpenPasswordResetDialog(agent._id || agent.id)}
+                          title="Reset Password"
+                        >
+                          <LockResetIcon />
+                        </IconButton>
+                        <IconButton 
+                          size="small" 
+                          color="primary" 
+                          onClick={() => handleMobileLogout(agent._id || agent.id)}
+                          title="Logout from mobile app"
+                        >
+                          <PhoneAndroidIcon />
                         </IconButton>
                         <IconButton size="small" color="error" onClick={() => handleDeleteAgent(agent._id || agent.id)}>
                           <DeleteIcon />
@@ -1115,6 +1216,84 @@ const RepoAgentList = () => {
             }}
           >
             Save Configuration
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Password Reset Dialog */}
+      <Dialog 
+        open={openPasswordResetDialog} 
+        onClose={handleClosePasswordResetDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ 
+          bgcolor: 'background.paper',
+          color: 'text.primary',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          fontWeight: 'bold',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          py: 2
+        }}>
+          <LockResetIcon />
+          Reset Password
+        </DialogTitle>
+        <DialogContent sx={{ p: 3 }}>
+          <TextField
+            fullWidth
+            label="New Password *"
+            name="newPassword"
+            type="password"
+            value={passwordResetData.newPassword}
+            onChange={handlePasswordResetInputChange}
+            sx={{ mb: 2 }}
+            error={!!passwordResetErrors.newPassword}
+            helperText={passwordResetErrors.newPassword || 'Minimum 6 characters'}
+          />
+          <TextField
+            fullWidth
+            label="Confirm Password *"
+            name="confirmPassword"
+            type="password"
+            value={passwordResetData.confirmPassword}
+            onChange={handlePasswordResetInputChange}
+            error={!!passwordResetErrors.confirmPassword}
+            helperText={passwordResetErrors.confirmPassword}
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2, gap: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Button
+            variant="outlined"
+            onClick={handleClosePasswordResetDialog}
+            disabled={loading}
+            sx={{ 
+              minWidth: 100,
+              borderRadius: 2,
+              borderColor: '#424242',
+              color: '#424242',
+              '&:hover': { 
+                borderColor: '#616161',
+                bgcolor: 'rgba(66, 66, 66, 0.04)'
+              }
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handlePasswordReset}
+            disabled={loading}
+            sx={{ 
+              minWidth: 100,
+              borderRadius: 2,
+              bgcolor: '#424242',
+              '&:hover': { bgcolor: '#616161' }
+            }}
+          >
+            {loading ? <CircularProgress size={20} /> : 'Reset Password'}
           </Button>
         </DialogActions>
       </Dialog>

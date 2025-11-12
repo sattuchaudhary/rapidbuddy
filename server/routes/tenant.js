@@ -19,6 +19,7 @@ const {
 } = require('../controllers/tenantController');
 
 const { authenticateToken, requireSuperAdmin, requireAdmin } = require('../middleware/auth');
+const { trackDataDownload, enforceDataDownloadLimit } = require('../middleware/usageTracking');
 
 // Public (tenant-auth) endpoints – must come BEFORE super-admin middleware
 
@@ -386,7 +387,6 @@ router.get('/agency-confirmers/mobile', authenticateUnifiedToken, async (req, re
     const isRepoAgent = typeof userType === 'string' && userType.toLowerCase().includes('repo') ||
                        typeof role === 'string' && role.toLowerCase().includes('repo') ||
                        typeof req.user?.designation === 'string' && req.user.designation.toLowerCase().includes('repo') ||
-                       typeof req.user?.type === 'string' && req.user.type.toLowerCase().includes('repo') ||
                        typeof req.user?.title === 'string' && req.user.title.toLowerCase().includes('repo');
 
     // Only repo agents can access agency confirmer data
@@ -485,9 +485,9 @@ router.delete('/:id', deleteTenant);
 router.post('/add-clientmanagement', addClientManagementToExistingTenants);
 
 // Data fetch endpoints for tenant users (require admin access)
-router.get('/data/two-wheeler', authenticateToken, requireAdmin, getTwoWheelerData);
-router.get('/data/four-wheeler', authenticateToken, requireAdmin, getFourWheelerData);
-router.get('/data/cv', authenticateToken, requireAdmin, getCVData);
+router.get('/data/two-wheeler', authenticateToken, requireAdmin, trackDataDownload((data) => data?.data?.length || 0), getTwoWheelerData);
+router.get('/data/four-wheeler', authenticateToken, requireAdmin, trackDataDownload((data) => data?.data?.length || 0), getFourWheelerData);
+router.get('/data/cv', authenticateToken, requireAdmin, trackDataDownload((data) => data?.data?.length || 0), getCVData);
 
 
 module.exports = router;

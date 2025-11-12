@@ -1,5 +1,8 @@
 import { createTheme } from '@mui/material/styles';
 
+// Create base theme to get default shadows (ensures all 25 shadows are available)
+const baseTheme = createTheme();
+
 const theme = createTheme({
   palette: {
     mode: 'light',
@@ -107,31 +110,18 @@ const theme = createTheme({
     borderRadius: 12,
   },
   shadows: [
+    // Custom shadows for elevations 0-5
     'none',
     '0 1px 2px 0 rgb(0 0 0 / 0.05)',
     '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
     '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
     '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
     '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-    '0 25px 50px -12px rgb(0 0 0 / 0.25)',
-  ],
+    // Custom shadow for elevations 6-24
+    ...Array(19).fill('0 25px 50px -12px rgb(0 0 0 / 0.25)'),
+    // Ensure we have exactly 25 shadows by using default for any missing ones
+    ...baseTheme.shadows.slice(25),
+  ].slice(0, 25),
   components: {
     MuiButton: {
       styleOverrides: {

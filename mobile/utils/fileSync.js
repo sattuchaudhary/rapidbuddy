@@ -170,7 +170,30 @@ export const downloadNextForFile = async (fileName, options = {}) => {
     return { fileName, downloaded: 0, inserted: 0, hasMore: false, total: meta?.total || 0 };
   }
 
-  const inserted = await bulkInsertVehicles(rows, { chunkSize: 1500, reindex: false });
+  // Insert records into database
+  let inserted = 0;
+  try {
+    inserted = await bulkInsertVehicles(rows, { chunkSize: 1500, reindex: false });
+    console.log(`💾 File ${fileName}: Inserted ${inserted} out of ${rows.length} records`);
+    
+    if (rows.length > 0 && inserted === 0) {
+      console.error(`❌ CRITICAL: bulkInsertVehicles returned 0 inserted for ${rows.length} rows from file ${fileName}!`);
+    }
+  } catch (insertError) {
+    console.error(`❌ Error in bulkInsertVehicles for file ${fileName}:`, insertError?.message || insertError);
+    throw insertError; // Re-throw to stop download if insert fails
+  }
+  
+  // Mark these ids as seen to support mirror deletes later
+  try {
+    const ids = rows.map(r => r?._id).filter(Boolean);
+    if (ids.length > 0) {
+      await markSeenIds(ids);
+    }
+  } catch (markError) {
+    console.error(`Error marking seen IDs for file ${fileName}:`, markError?.message || markError);
+    // Don't fail if marking fails, but log it
+  }
   const newDownloaded = currentDownloaded + rows.length;
   const newOffset = lastOffset + rows.length;
   await upsertFileMeta(fileName, {
@@ -191,62 +214,219 @@ export const singleClickPerFileSync = async (onProgress = null, limit = 50000) =
   const files = await listAllFiles();
   const metas = await listFileMeta();
   const metaByName = new Map(metas.map(m => [m.fileName, m]));
-  let processed = 0;
-  let skipped = 0;
-  let totalInserted = 0;
-  let totalRecords = 0;
 
-  // Calculate total records to download for progress tracking
+  // Find the first file that is not completed
+  const nextFileToDownload = files.find(f => {
+    const meta = metaByName.get(f.fileName);
+    return !(meta?.completed && meta?.total && meta?.downloaded >= meta?.total);
+  });
+
+  if (!nextFileToDownload) {
+    return {
+      success: false,
+      message: 'All files are already downloaded.',
+      fileId: null,
+      remaining: 0
+    };
+  }
+
+  // Download only one batch for the next incomplete file
+  const res = await downloadNextForFile(nextFileToDownload.fileName, { limit });
+
+  // Count remaining files
+  let remainingFiles = 0;
   for (const f of files) {
     const meta = metaByName.get(f.fileName);
     if (!(meta?.completed && meta?.total && meta?.downloaded >= meta?.total)) {
-      totalRecords += Math.min(limit, parseInt(f.total || 0));
+      remainingFiles++;
     }
   }
-
-  let downloadedRecords = 0;
-
-  for (const f of files) {
-    const meta = metaByName.get(f.fileName);
-    if (meta?.completed && meta?.total && meta?.downloaded >= meta?.total) {
-      skipped++;
-      continue;
-    }
-    
-    // Download only one batch (50k records) per file per sync
-    const res = await downloadNextForFile(f.fileName, { limit });
-    totalInserted += res.inserted;
-    downloadedRecords += res.downloaded;
-    
-    if (onProgress) {
-      try { 
-        // Calculate percentage based on downloaded records vs total records
-        const percentage = totalRecords > 0 ? Math.min(99, Math.round((downloadedRecords / totalRecords) * 100)) : 0;
-        
-        onProgress({ 
-          processedFiles: processed, 
-          totalFiles: files.length, 
-          inserted: totalInserted, 
-          downloadedRecords: downloadedRecords,
-          totalRecords: totalRecords,
-          percentage: percentage,
-          currentFile: f.fileName
-        }); 
-      } catch (_) {}
-    }
-    
-    processed++;
+  // If the current file is now complete, decrement the count
+  if (!res.hasMore) {
+    remainingFiles = Math.max(0, remainingFiles - 1);
   }
-  
-  return { 
-    success: true, 
-    filesProcessed: processed, 
-    filesSkipped: skipped, 
-    totalFiles: files.length, 
-    totalInserted
+
+  return {
+    success: true,
+    fileId: nextFileToDownload.fileName,
+    inserted: res.inserted,
+    downloaded: res.downloaded,
+    remaining: remainingFiles,
+    hasMoreInFile: res.hasMore
   };
 };
 
+/**
+ * Smart Sync - Mirrors server data to offline database
+ * 
+ * Strategy:
+ * 1. Reset sync_seen table to track which records exist on server
+ * 2. Delete metadata for files removed from server (records deleted later)
+ * 3. Download all files from server, marking each record ID as "seen"
+ * 4. Delete any records not marked as "seen" (these were deleted from server)
+ * 
+ * This ensures offline database is an exact mirror of server:
+ * - New records from server → Added to offline
+ * - Updated records from server → Replaced in offline (INSERT OR REPLACE)
+ * - Deleted files from server → Records removed from offline
+ * - Individual deleted records → Removed from offline
+ */
+export const smartSync = async (onProgress) => {
+  onProgress({ status: 'Starting sync...', progress: 0 });
+
+  // 1. Get server files and local metadata
+  const serverFiles = await listAllFiles();
+  const localMetas = await listFileMeta();
+  const localMetaMap = new Map(localMetas.map(m => [m.fileName, m]));
+  onProgress({ status: 'Comparing local and server files...', progress: 5 });
+
+  // Prepare mirror set for deletions: clear seen ids at start of full sync
+  // This table tracks which records exist on server in current sync
+  try { await resetSeen(); } catch (_) {}
+
+  // 2. Identify new, incomplete, and deleted files
+  const filesToDownload = [];
+  const completedFiles = [];
+  const serverFileNames = new Set(serverFiles.map(f => f.fileName));
+
+  for (const serverFile of serverFiles) {
+    const localMeta = localMetaMap.get(serverFile.fileName);
+    if (!localMeta || !localMeta.completed) {
+      filesToDownload.push(serverFile);
+    } else {
+      // File is marked as completed - verify records actually exist in database
+      // If not, we need to re-download it
+      try {
+        const { countVehicles } = await import('./db');
+        const currentCount = await countVehicles();
+        const expectedRecords = parseInt(localMeta.downloaded || 0);
+        
+        // If database is empty or has very few records compared to what we expect,
+        // treat the file as incomplete and re-download
+        if (currentCount === 0 || (expectedRecords > 100 && currentCount < expectedRecords * 0.1)) {
+          console.warn(`⚠️ File ${serverFile.fileName} marked completed but database has ${currentCount} records (expected ~${expectedRecords}). Re-downloading...`);
+          filesToDownload.push(serverFile);
+          // Mark file as incomplete so it gets re-downloaded
+          const { upsertFileMeta } = await import('./db');
+          await upsertFileMeta(serverFile.fileName, { completed: 0, downloaded: 0, lastOffset: 0 });
+        } else {
+          // File is truly completed - mark its records as seen
+          completedFiles.push(serverFile);
+        }
+      } catch (verifyError) {
+        console.error(`Error verifying file ${serverFile.fileName}:`, verifyError);
+        // On error, treat as incomplete and re-download
+        filesToDownload.push(serverFile);
+      }
+    }
+  }
+
+  // 2.5. Mark existing records from completed files as "seen"
+  // This prevents them from being deleted when we sync new files
+  // We fetch first page of each completed file to get their record IDs
+  // NOTE: Skip this if there are no completed files to avoid unnecessary API calls
+  if (completedFiles.length > 0) {
+    onProgress({ status: `Marking ${completedFiles.length} completed files as seen...`, progress: 6 });
+    try {
+      const { markCompletedFileRecordsAsSeen } = await import('./db');
+      let totalMarked = 0;
+      for (let idx = 0; idx < completedFiles.length; idx++) {
+        const completedFile = completedFiles[idx];
+        try {
+          const marked = await markCompletedFileRecordsAsSeen(completedFile.fileName);
+          totalMarked += marked || 0;
+          console.log(`✅ Marked ${marked || 0} records from file ${idx + 1}/${completedFiles.length}: ${completedFile.fileName}`);
+        } catch (fileError) {
+          console.error(`Error marking file ${completedFile.fileName}:`, fileError?.message || fileError);
+          // Continue with next file instead of failing entire sync
+        }
+      }
+      console.log(`✅ Total marked ${totalMarked} records from ${completedFiles.length} completed files as seen`);
+    } catch (e) {
+      console.error('Error marking completed files as seen:', e);
+      // Don't fail the entire sync if marking fails - continue with download
+    }
+  }
+
+  const filesToDelete = localMetas.filter(m => !serverFileNames.has(m.fileName));
+  onProgress({ status: `Found ${filesToDownload.length} new/incomplete files and ${filesToDelete.length} files to delete.`, progress: 10 });
+
+  // 3. First, handle deleted files - remove their records from offline database
+  let totalDeleted = 0;
+  if (filesToDelete.length > 0) {
+    onProgress({ status: `Deleting ${filesToDelete.length} removed files from offline database...`, progress: 12 });
+    try {
+      const { deleteFileRecords } = await import('./db');
+      for (const deletedFile of filesToDelete) {
+        const deletedCount = await deleteFileRecords(deletedFile.fileName);
+        totalDeleted += deletedCount || 0;
+        console.log(`🗑️ Deleted file ${deletedFile.fileName}: ${deletedCount || 0} records removed`);
+      }
+      console.log(`🗑️ Total records deleted from removed files: ${totalDeleted}`);
+    } catch (e) {
+      console.error('Error deleting removed files:', e);
+    }
+  }
+
+  // 4. Download new/incomplete files one by one
+  let totalInserted = 0;
+  const downloadProgressStart = filesToDelete.length > 0 ? 15 : 10;
+  for (let i = 0; i < filesToDownload.length; i++) {
+    const file = filesToDownload[i];
+    const progress = downloadProgressStart + Math.round(((i + 1) / filesToDownload.length) * 75);
+    onProgress({
+      status: `Downloading file ${i + 1}/${filesToDownload.length}: ${file.fileName}`,
+      progress
+    });
+
+    let hasMore = true;
+    let fileInserted = 0;
+    let fileDownloaded = 0;
+    while (hasMore) {
+      try {
+        const res = await downloadNextForFile(file.fileName, { limit: 50000 });
+        hasMore = res.hasMore;
+        fileInserted += res.inserted || 0;
+        fileDownloaded += res.downloaded || 0;
+        totalInserted += res.inserted || 0;
+        console.log(`📥 File ${file.fileName}: downloaded ${res.downloaded || 0}, inserted ${res.inserted || 0} records (total for file: ${fileInserted})`);
+        
+        // Verify insertion worked
+        if (res.downloaded > 0 && res.inserted === 0) {
+          console.warn(`⚠️ WARNING: Downloaded ${res.downloaded} records but inserted 0! Check bulkInsertVehicles`);
+        }
+      } catch (downloadError) {
+        console.error(`Error downloading file ${file.fileName}:`, downloadError?.message || downloadError);
+        // Continue with next file instead of failing entire sync
+        hasMore = false;
+      }
+    }
+    console.log(`✅ Completed file ${file.fileName}: ${fileDownloaded} downloaded, ${fileInserted} inserted`);
+  }
+  console.log(`📊 Total records inserted during sync: ${totalInserted}`);
+
+  // 5. Mirror deletions: remove any records not seen this run (server-deleted individual records)
+  onProgress({ status: `Applying deletions to mirror server...`, progress: 95 });
+  let mirrorDeleted = 0;
+  try {
+    const result = await deleteNotSeen();
+    mirrorDeleted = result?.deleted || 0;
+    console.log(`🗑️ Mirror deletion: ${mirrorDeleted} records deleted (not found on server)`);
+  } catch (e) {
+    console.error('Mirror delete error:', e?.message || e);
+  }
+
+  onProgress({ status: 'Sync complete!', progress: 100 });
+  const totalDeletedRecords = totalDeleted + mirrorDeleted;
+  console.log(`🎉 Sync completed: ${filesToDownload.length} files downloaded, ${totalInserted} records inserted, ${totalDeletedRecords} records deleted`);
+  return { 
+    success: true, 
+    downloaded: filesToDownload.length, 
+    deletedFiles: filesToDelete.length, 
+    deletedRecords: totalDeletedRecords,
+    inserted: totalInserted 
+  };
+};
 
 export const debugFileComparison = async () => { return; };
 

@@ -270,20 +270,22 @@ export const bulkInsertVehicles = async (items, options = {}) => {
 
   console.log(`📦 Bulk inserting ${items.length} items in chunks of ${chunkSize}`);
 
-  // Start transaction for better performance and consistency
-  await executeSql(db, 'BEGIN TRANSACTION');
-
   try {
-    for (let i = 0; i < items.length; i += chunkSize) {
-    const chunk = items.slice(i, i + chunkSize);
-    
     if (_isNewAPI) {
-      // New API - run the whole chunk inside a lock
+    // New API - wrap entire operation in runLocked to ensure transaction integrity
+    // Process all chunks within a single transaction context
+    await runLocked(async () => {
+      // Start transaction
+      db.runSync('BEGIN TRANSACTION');
+      
       try {
         const sql = `INSERT OR REPLACE INTO vehicles
           (_id, vehicleType, regNo, regSuffix, chassisNo, chassisLc, loanNo, bank, make, customerName, address)
          VALUES (?,?,?,?,?,?,?,?,?,?,?)`;
-        await runLocked(async () => {
+        
+        for (let i = 0; i < items.length; i += chunkSize) {
+          const chunk = items.slice(i, i + chunkSize);
+          
           for (const v of chunk) {
             try {
               const regNo = String(v.regNo || v.reg_no || v.registrationNumber || v.registration_no || v.vehicleNo || v.vehicle_no || '').trim();
@@ -294,6 +296,7 @@ export const bulkInsertVehicles = async (items, options = {}) => {
               const rawId = v?._id || v?.id || (v?._id && v?._id.$oid) || v?.mongoId || v?.mongo_id;
               const derivedId = String(rawId || `${regNo}#${chassisNo}`);
               
+              // Use runSync directly within the transaction
               const result = db.runSync(sql, [
                 derivedId,
                 String(v.vehicleType || v.vehicle_type || ''),
@@ -308,26 +311,47 @@ export const bulkInsertVehicles = async (items, options = {}) => {
                 String(v.address || v.customer_address || '')
               ]);
               
-              inserted++;
+              if (result?.changes > 0) {
+                inserted++;
+              }
               
               // Log every 100th insertion for debugging
               if (inserted % 100 === 0) {
                 console.log(`📝 Inserted ${inserted} records so far...`);
               }
             } catch (individualError) {
-              console.error('Individual insert failed:', individualError);
+              console.error('Individual insert failed:', individualError, 'Record:', v?._id || 'unknown');
+              // Continue with next record instead of failing entire batch
             }
           }
-        });
-      } catch (e) {
-        console.error('Bulk insert error (new API):', e);
-        throw e;
+          
+          // Progress logging for large datasets
+          if (i % (chunkSize * 10) === 0) {
+            console.log(`📊 Progress: ${Math.min(i + chunkSize, items.length)}/${items.length} items processed`);
+          }
+        }
+        
+        // Commit transaction
+        db.runSync('COMMIT');
+        console.log('✅ Transaction committed successfully');
+      } catch (error) {
+        // Rollback on error
+        try {
+          db.runSync('ROLLBACK');
+          console.error('❌ Transaction rolled back due to error');
+        } catch (rollbackError) {
+          console.error('Rollback error:', rollbackError);
+        }
+        throw error;
       }
-    } else {
-      // Legacy API - transaction based with error handling
-      await new Promise((resolve, reject) => {
-        db.transaction(tx => {
-          try {
+    });
+  } else {
+    // Legacy API - use transaction API
+    await new Promise((resolve, reject) => {
+      db.transaction(tx => {
+        try {
+          for (let i = 0; i < items.length; i += chunkSize) {
+            const chunk = items.slice(i, i + chunkSize);
             for (const v of chunk) {
               const regNo = String(v.regNo || v.reg_no || v.registrationNumber || v.registration_no || v.vehicleNo || v.vehicle_no || '').trim();
               const regSuffix = regNo.length >= 4 ? regNo.slice(-4) : '';
@@ -354,23 +378,18 @@ export const bulkInsertVehicles = async (items, options = {}) => {
                 ]
               );
             }
-          } catch (e) { 
-            console.error('Transaction error:', e);
-            reject(e); 
           }
-        }, reject, () => { 
-          inserted += chunk.length; 
-          resolve(); 
-        });
+        } catch (e) { 
+          console.error('Transaction error:', e);
+          reject(e); 
+        }
+      }, reject, () => { 
+        inserted = items.length; 
+        resolve(); 
       });
-    }
-    
-    // Progress logging for large datasets
-    if (i % (chunkSize * 10) === 0) {
-      console.log(`📊 Progress: ${Math.min(i + chunkSize, items.length)}/${items.length} items processed`);
-    }
+    });
   }
-  
+
   // Rebuild indexes if requested and we have the new API
   if (reindex && _isNewAPI) {
     try {
@@ -379,16 +398,24 @@ export const bulkInsertVehicles = async (items, options = {}) => {
       console.log('Index rebuild completed with warnings');
     }
   }
-  
-  // Commit transaction
-  await executeSql(db, 'COMMIT');
-  console.log(`✅ Bulk insert completed: ${inserted} items inserted`);
-  return inserted;
-  
+
+  // Get count after commit to verify
+  let finalCount = 0;
+  try {
+    const verifyCount = await executeSql(db, 'SELECT COUNT(1) as c FROM vehicles');
+    finalCount = verifyCount?.rows?._array?.[0]?.c || 0;
+    console.log(`🔍 Verification: Database now has ${finalCount} total records`);
+    if (finalCount < inserted) {
+      console.warn(`⚠️ Warning: Inserted ${inserted} but database shows ${finalCount} records`);
+    }
+  } catch (verifyError) {
+    console.error('⚠️ Could not verify insert count:', verifyError?.message || verifyError);
+  }
+
+    console.log(`✅ Bulk insert completed: ${inserted} items inserted`);
+    return inserted;
   } catch (error) {
-    // Rollback transaction on error
-    await executeSql(db, 'ROLLBACK');
-    console.error('❌ Bulk insert failed, transaction rolled back:', error);
+    console.error('❌ Bulk insert failed:', error);
     throw error;
   }
 };
@@ -498,7 +525,122 @@ export const markSeenIds = async (ids) => {
 
 export const deleteNotSeen = async () => {
   const db = getDatabase();
-  await executeSql(db, 'DELETE FROM vehicles WHERE _id NOT IN (SELECT _id FROM sync_seen)');
+  // First get count of records to be deleted
+  const countRes = await executeSql(db, 'SELECT COUNT(1) as c FROM vehicles WHERE _id NOT IN (SELECT _id FROM sync_seen)');
+  const countToDelete = countRes?.rows?._array?.[0]?.c || 0;
+  
+  if (countToDelete > 0) {
+    // Delete records not seen in this sync (server-deleted records)
+    await executeSql(db, 'DELETE FROM vehicles WHERE _id NOT IN (SELECT _id FROM sync_seen)');
+    console.log(`🗑️ Deleted ${countToDelete} records that were removed from server`);
+  }
+  
+  return { deleted: countToDelete };
+};
+
+// Mark all existing records from a completed file as "seen"
+// This prevents them from being deleted when syncing new files
+// We do this by fetching pages of the file from server to get record IDs
+export const markCompletedFileRecordsAsSeen = async (fileName) => {
+  if (!fileName) return 0;
+  
+  try {
+    // Dynamic imports to avoid circular dependencies
+    const axios = (await import('axios')).default;
+    const SecureStore = await import('expo-secure-store');
+    const { getBaseURL } = await import('./config');
+    
+    const token = await SecureStore.getItemAsync('token');
+    if (!token) {
+      console.warn(`No token for marking file ${fileName} as seen`);
+      return 0;
+    }
+    
+    const headers = { Authorization: `Bearer ${token}` };
+    const base = getBaseURL();
+    const id = encodeURIComponent(fileName);
+    
+    let totalMarked = 0;
+    let page = 1;
+    const limit = 10000; // Fetch larger chunks for efficiency
+    
+    // Fetch all pages to get all record IDs
+    // Limit to max 10 pages to avoid timeout on very large files
+    const maxPages = 10;
+    while (page <= maxPages) {
+      try {
+        const { data } = await axios.get(`${base}/api/tenant/data/file/${id}`, {
+          headers,
+          params: { page, limit },
+          timeout: 20000
+        });
+        
+        if (!data?.success || !Array.isArray(data?.data) || data.data.length === 0) {
+          break; // No more records
+        }
+        
+        // Extract record IDs and mark them as seen
+        const ids = data.data.map(r => r?._id).filter(Boolean);
+        if (ids.length > 0) {
+          await markSeenIds(ids);
+          totalMarked += ids.length;
+        }
+        
+        // Check if there are more pages
+        const totalPages = data?.pagination?.pages || 1;
+        if (page >= totalPages || data.data.length < limit) {
+          break; // No more pages
+        }
+        
+        page++;
+      } catch (pageError) {
+        console.error(`Error fetching page ${page} of file ${fileName}:`, pageError?.message || pageError);
+        // Continue with next page or break if critical error
+        if (pageError?.response?.status >= 400 && pageError?.response?.status < 500) {
+          break; // Client error - stop trying
+        }
+        page++; // Try next page on network errors
+        if (page > maxPages) break;
+      }
+    }
+    
+    if (totalMarked > 0) {
+      console.log(`✅ Marked ${totalMarked} records from completed file ${fileName} as seen`);
+    } else {
+      console.warn(`⚠️ No records marked for file ${fileName} - may need full re-download`);
+    }
+    
+    return totalMarked;
+  } catch (e) {
+    console.error(`Error marking completed file ${fileName} records as seen:`, e?.message || e);
+    // Return 0 but don't throw - let sync continue
+    return 0;
+  }
+};
+
+// Delete file metadata when file is removed from server
+// The actual records will be deleted by deleteNotSeen since they won't be in sync_seen
+export const deleteFileRecords = async (fileName) => {
+  if (!fileName) return 0;
+  const db = getDatabase();
+  
+  try {
+    // Get the file metadata to know how many records it had
+    const metaRes = await executeSql(db, 'SELECT downloaded FROM file_sync WHERE fileName = ?', [String(fileName)]);
+    const meta = metaRes?.rows?._array?.[0];
+    const recordCount = meta?.downloaded || 0;
+    
+    // Delete the file metadata
+    // The actual vehicle records will be deleted by deleteNotSeen() 
+    // since they won't be marked as seen in the current sync
+    await executeSql(db, 'DELETE FROM file_sync WHERE fileName = ?', [String(fileName)]);
+    
+    console.log(`🗑️ Removed file metadata for ${fileName} (had ${recordCount} records)`);
+    return recordCount;
+  } catch (e) {
+    console.error('Error deleting file metadata:', e);
+    return 0;
+  }
 };
 
 export const countSeen = async () => {

@@ -6,12 +6,13 @@ const Tenant = require('../models/Tenant');
 const { getTenantDB } = require('../config/database');
 const zlib = require('zlib');
 const { promisify } = require('util');
+const { trackDataDownload, enforceDataDownloadLimit } = require('../middleware/usageTracking');
 
 const gzip = promisify(zlib.gzip);
 const deflate = promisify(zlib.deflate);
 
 // Enhanced bulk download with compression and streaming
-router.get('/bulk-data', authenticateUnifiedToken, async (req, res) => {
+router.get('/bulk-data', authenticateUnifiedToken, enforceDataDownloadLimit((req) => 50000), trackDataDownload((data) => Array.isArray(data) ? data.length : 0), async (req, res) => {
   try {
     const { 
       format = 'json', 
@@ -193,7 +194,7 @@ router.get('/bulk-data', authenticateUnifiedToken, async (req, res) => {
 });
 
 // Optimized chunked download with progress tracking
-router.get('/bulk-chunked', authenticateUnifiedToken, async (req, res) => {
+router.get('/bulk-chunked', authenticateUnifiedToken, enforceDataDownloadLimit((req) => parseInt(req.query.limit) || 10000), trackDataDownload((data) => data?.data?.length || 0), async (req, res) => {
   try {
     const { 
       collection = 'two',
@@ -269,7 +270,7 @@ router.get('/bulk-chunked', authenticateUnifiedToken, async (req, res) => {
 });
 
 // List only IDs for a collection (paginated)
-router.get('/bulk-ids', authenticateUnifiedToken, async (req, res) => {
+router.get('/bulk-ids', authenticateUnifiedToken, enforceDataDownloadLimit((req) => parseInt(req.query.limit) || 10000), trackDataDownload((data) => data?.ids?.length || 0), async (req, res) => {
   try {
     const { collection = 'two', skip = 0, limit = 10000 } = req.query;
 
@@ -300,7 +301,7 @@ router.get('/bulk-ids', authenticateUnifiedToken, async (req, res) => {
 });
 
 // Fetch records by IDs (batched client-side)
-router.post('/by-ids', authenticateUnifiedToken, async (req, res) => {
+router.post('/by-ids', authenticateUnifiedToken, enforceDataDownloadLimit((req) => req.body?.ids?.length || 0), trackDataDownload((data) => data?.data?.length || 0), async (req, res) => {
   try {
     const { ids = [], collection = 'two' } = req.body || {};
     if (!Array.isArray(ids) || ids.length === 0) return res.json({ success: true, data: [] });
@@ -414,7 +415,7 @@ router.post('/create-snapshot', authenticateUnifiedToken, requireAdmin, async (r
 });
 
 // Simple dump endpoint for mobile app (50k records max per batch)
-router.get('/simple-dump', authenticateUnifiedToken, async (req, res) => {
+router.get('/simple-dump', authenticateUnifiedToken, enforceDataDownloadLimit((req) => Math.min(parseInt(req.query.limit) || 50000, 50000)), trackDataDownload((data) => data?.data?.length || 0), async (req, res) => {
   try {
     const { limit = 50000, offset = 0 } = req.query;
     
@@ -536,7 +537,7 @@ router.get('/simple-dump', authenticateUnifiedToken, async (req, res) => {
 });
 
 // Get new records since timestamp (for incremental sync)
-router.get('/new-records', authenticateUnifiedToken, async (req, res) => {
+router.get('/new-records', authenticateUnifiedToken, enforceDataDownloadLimit((req) => Math.min(parseInt(req.query.limit) || 50000, 50000)), trackDataDownload((data) => data?.data?.length || 0), async (req, res) => {
   try {
     const { since, limit = 50000, offset = 0 } = req.query;
     

@@ -38,7 +38,8 @@ import {
   Business as BusinessIcon,
   Refresh as RefreshIcon,
   Search as SearchIcon,
-  Person as PersonIcon
+  Person as PersonIcon,
+  LockReset as LockResetIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
@@ -57,6 +58,15 @@ const OfficeStaffList = () => {
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
   
+  // Password Reset Dialog
+  const [openPasswordResetDialog, setOpenPasswordResetDialog] = useState(false);
+  const [passwordResetStaffId, setPasswordResetStaffId] = useState(null);
+  const [passwordResetData, setPasswordResetData] = useState({
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [passwordResetErrors, setPasswordResetErrors] = useState({});
+
   // Add Office Staff Dialog
   const [openAddDialog, setOpenAddDialog] = useState(false);
   const [formData, setFormData] = useState({
@@ -156,6 +166,66 @@ const OfficeStaffList = () => {
     } catch (error) {
       console.error('Error deleting office staff:', error);
       setError(error.response?.data?.message || 'Failed to delete office staff');
+    }
+  };
+
+  const handleOpenPasswordResetDialog = (staffId) => {
+    setPasswordResetStaffId(staffId);
+    setPasswordResetData({ newPassword: '', confirmPassword: '' });
+    setPasswordResetErrors({});
+    setOpenPasswordResetDialog(true);
+  };
+
+  const handleClosePasswordResetDialog = () => {
+    setOpenPasswordResetDialog(false);
+    setPasswordResetStaffId(null);
+    setPasswordResetData({ newPassword: '', confirmPassword: '' });
+    setPasswordResetErrors({});
+  };
+
+  const handlePasswordResetInputChange = (e) => {
+    const { name, value } = e.target;
+    setPasswordResetData(prev => ({ ...prev, [name]: value }));
+    if (passwordResetErrors[name]) {
+      setPasswordResetErrors(prev => ({ ...prev, [name]: '' }));
+    }
+  };
+
+  const validatePasswordReset = () => {
+    const errors = {};
+    if (!passwordResetData.newPassword) {
+      errors.newPassword = 'Password is required';
+    } else if (passwordResetData.newPassword.length < 6) {
+      errors.newPassword = 'Password must be at least 6 characters';
+    }
+    if (!passwordResetData.confirmPassword) {
+      errors.confirmPassword = 'Please confirm password';
+    } else if (passwordResetData.newPassword !== passwordResetData.confirmPassword) {
+      errors.confirmPassword = 'Passwords do not match';
+    }
+    setPasswordResetErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handlePasswordReset = async () => {
+    if (!validatePasswordReset()) return;
+    
+    try {
+      setLoading(true);
+      const token = localStorage.getItem('token');
+      await axios.put(`/api/tenant/users/staff/${passwordResetStaffId}/reset-password`, {
+        newPassword: passwordResetData.newPassword
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setSuccess('Password reset successfully');
+      handleClosePasswordResetDialog();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (error) {
+      console.error('Error resetting password:', error);
+      setError(error.response?.data?.message || 'Failed to reset password');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -356,7 +426,7 @@ const OfficeStaffList = () => {
         <Button
           variant="contained"
           startIcon={<AddIcon />}
-          onClick={handleOpenAddDialog}
+          onClick={() => navigate('/app/tenant/users/staff/register')}
           sx={{ 
             borderRadius: 2,
             bgcolor: '#424242',
@@ -567,6 +637,14 @@ const OfficeStaffList = () => {
                         </IconButton>
                         <IconButton size="small" color="primary" onClick={() => navigate(`/app/tenant/users/staff/${staffMember._id || staffMember.id}?edit=1`)}>
                           <EditIcon />
+                        </IconButton>
+                        <IconButton 
+                          size="small" 
+                          color="warning" 
+                          onClick={() => handleOpenPasswordResetDialog(staffMember._id || staffMember.id)}
+                          title="Reset Password"
+                        >
+                          <LockResetIcon />
                         </IconButton>
                         <IconButton size="small" color="error" onClick={() => handleDeleteStaff(staffMember._id || staffMember.id)}>
                           <DeleteIcon />
@@ -895,6 +973,84 @@ const OfficeStaffList = () => {
             }}
           >
             {loading ? <CircularProgress size={20} /> : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Password Reset Dialog */}
+      <Dialog 
+        open={openPasswordResetDialog} 
+        onClose={handleClosePasswordResetDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ 
+          bgcolor: 'background.paper',
+          color: 'text.primary',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          fontWeight: 'bold',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          py: 2
+        }}>
+          <LockResetIcon />
+          Reset Password
+        </DialogTitle>
+        <DialogContent sx={{ p: 3 }}>
+          <TextField
+            fullWidth
+            label="New Password *"
+            name="newPassword"
+            type="password"
+            value={passwordResetData.newPassword}
+            onChange={handlePasswordResetInputChange}
+            sx={{ mb: 2 }}
+            error={!!passwordResetErrors.newPassword}
+            helperText={passwordResetErrors.newPassword || 'Minimum 6 characters'}
+          />
+          <TextField
+            fullWidth
+            label="Confirm Password *"
+            name="confirmPassword"
+            type="password"
+            value={passwordResetData.confirmPassword}
+            onChange={handlePasswordResetInputChange}
+            error={!!passwordResetErrors.confirmPassword}
+            helperText={passwordResetErrors.confirmPassword}
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2, gap: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Button
+            variant="outlined"
+            onClick={handleClosePasswordResetDialog}
+            disabled={loading}
+            sx={{ 
+              minWidth: 100,
+              borderRadius: 2,
+              borderColor: '#424242',
+              color: '#424242',
+              '&:hover': { 
+                borderColor: '#616161',
+                bgcolor: 'rgba(66, 66, 66, 0.04)'
+              }
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handlePasswordReset}
+            disabled={loading}
+            sx={{ 
+              minWidth: 100,
+              borderRadius: 2,
+              bgcolor: '#424242',
+              '&:hover': { bgcolor: '#616161' }
+            }}
+          >
+            {loading ? <CircularProgress size={20} /> : 'Reset Password'}
           </Button>
         </DialogActions>
       </Dialog>

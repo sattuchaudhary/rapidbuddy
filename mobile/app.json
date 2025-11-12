@@ -2,7 +2,7 @@
   "expo": {
     "name": "Rapid Repo",
     "slug": "rapid-repo",
-    "version": "1.0.4",
+    "version": "1.0.3",
     "sdkVersion": "54.0.0",
     "orientation": "portrait",
     "icon": "./assets/logo.png",
@@ -14,7 +14,7 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://u.expo.dev/e830db89-f4a2-47b6-a103-a23257f8fded"
     },
-    "runtimeVersion": "1.0.2",
+    "runtimeVersion": "1.0.3",
     "splash": {
       "image": "./assets/logo.png",
       "resizeMode": "contain",
@@ -23,7 +23,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.rapidbuddy.rapidrepo"
+      "bundleIdentifier": "com.rapidbuddy.rapidrepo",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.rapidbuddy.rapidrepo",
@@ -44,7 +47,9 @@
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.READ_EXTERNAL_STORAGE"
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE"
       ]
     },
     "web": {
@@ -52,7 +57,15 @@
       "bundler": "metro"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#10121A",
+          "sounds": []
+        }
+      ]
     ],
     "extra": {
       "eas": {

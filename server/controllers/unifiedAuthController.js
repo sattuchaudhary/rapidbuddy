@@ -4,85 +4,12 @@ const User = require('../models/User');
 const Tenant = require('../models/Tenant');
 const { getTenantDB } = require('../config/database');
 const mongoose = require('mongoose');
+const { getOfficeStaffModel, getRepoAgentModel } = require('../routes/tenantUsers');
 
-// Helper function to get OfficeStaff model (reuse existing model)
-const getOfficeStaffModel = (tenantConnection) => {
-  try {
-    // Try to get existing model first
-    if (tenantConnection.models && tenantConnection.models.OfficeStaff) {
-      return tenantConnection.model('OfficeStaff');
-    }
-    
-    // If model doesn't exist, create it
-    const officeStaffSchema = new mongoose.Schema({
-      name: { type: String, required: true, trim: true },
-      phoneNumber: { type: String, required: true, trim: true },
-      role: { type: String, required: true, enum: ['Sub Admin', 'Vehicle Confirmer', 'Manager', 'Supervisor', 'Staff'] },
-      password: { type: String, required: true },
-      status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
-      createdBy: { type: String, required: true }
-    }, { timestamps: true });
-
-    // Hash password before save
-    officeStaffSchema.pre('save', async function(next) {
-      if (!this.isModified('password')) return next();
-      try {
-        const salt = await bcrypt.genSalt(12);
-        this.password = await bcrypt.hash(this.password, salt);
-        next();
-      } catch (err) {
-        next(err);
-      }
-    });
-
-    return tenantConnection.model('OfficeStaff', officeStaffSchema);
-  } catch (error) {
-    if (error.name === 'OverwriteModelError') {
-      // Model already exists, return it
-      return tenantConnection.model('OfficeStaff');
-    }
-    throw error;
-  }
-};
-
-// Helper function to get RepoAgent model (reuse existing model)
-const getRepoAgentModel = (tenantConnection) => {
-  try {
-    // Try to get existing model first
-    if (tenantConnection.models && tenantConnection.models.RepoAgent) {
-      return tenantConnection.model('RepoAgent');
-    }
-    
-    // If model doesn't exist, create it
-    const repoAgentSchema = new mongoose.Schema({
-      name: { type: String, required: true, trim: true },
-      email: { type: String, required: true, trim: true, lowercase: true },
-      phoneNumber: { type: String, required: true, trim: true },
-      password: { type: String, required: true },
-      role: { type: String, default: 'Repo Agent' },
-      status: { type: String, enum: ['active', 'inactive', 'pending'], default: 'active' },
-      createdBy: { type: String, required: true }
-    }, { timestamps: true });
-
-    // Hash password before save
-    repoAgentSchema.pre('save', async function(next) {
-      if (!this.isModified('password')) return next();
-      try {
-        const salt = await bcrypt.genSalt(12);
-        this.password = await bcrypt.hash(this.password, salt);
-        next();
-      } catch (err) {
-        next(err);
-      }
-    });
-
-    return tenantConnection.model('RepoAgent', repoAgentSchema);
-  } catch (error) {
-    if (error.name === 'OverwriteModelError') {
-      // Model already exists, return it
-      return tenantConnection.model('RepoAgent');
-    }
-    throw error;
+// Controlled logging function
+const log = (message, ...args) => {
+  if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+    console.log(message, ...args);
   }
 };
 
@@ -105,7 +32,8 @@ const unifiedLogin = async (req, res) => {
 
     // Avoid logging raw identifiers to prevent sensitive data exposure
     const redactedId = typeof identifier === 'string' ? identifier.replace(/.(?=.{3})/g, '*') : '***';
-    console.log('[UnifiedLogin] Attempting login');
+    log('[UnifiedLogin] Attempting login');
+    log('[UnifiedLogin] Checking main system users first');
 
     // Step 1: Check main system users (Super Admin, Tenant Admin, Regular Users)
     const mainUser = await User.findOne({ 
@@ -151,15 +79,24 @@ const unifiedLogin = async (req, res) => {
     }
 
     // Step 2: Check tenant users (Office Staff and Repo Agents)
+    log('[UnifiedLogin] Main user not found, checking tenant users');
+    
     const tenants = await Tenant.find({ isActive: true }).lean();
+    log(`[UnifiedLogin] Found ${tenants.length} active tenants to check`);
+    
     let foundTenantUser = null;
+    let foundInactiveTenant = null;
+    let foundInvalidPassword = false;
 
     for (const tenant of tenants) {
       try {
         const conn = await getTenantDB(tenant.name);
+        log(`[UnifiedLogin] Checking tenant: ${tenant.name}`);
         
         // Check Office Staff (allow raw or digits-only phone)
         const OfficeStaff = getOfficeStaffModel(conn);
+        log('[UnifiedLogin] Using OfficeStaff model with schema fields:', Object.keys(OfficeStaff.schema.paths));
+        
         const raw = String(identifier || '').trim();
         const digits = raw.replace(/\D/g, '');
         const staff = await OfficeStaff.findOne({
@@ -167,41 +104,171 @@ const unifiedLogin = async (req, res) => {
             { phoneNumber: raw },
             { phoneNumber: digits }
           ]
-        });
+        }).select('+password');
 
-        if (staff && staff.status === 'active') {
-          const isPasswordValid = await bcrypt.compare(password, staff.password);
-          
-          if (isPasswordValid) {
-            foundTenantUser = {
-              user: staff,
-              tenant: tenant,
-              userType: 'office_staff'
-            };
-            break;
+        if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+          console.log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Query result:`, staff ? 'Found' : 'Not found');
+        }
+
+        if (staff) {
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Status:`, staff?.status);
           }
+
+          if (staff.status !== 'active') {
+            log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Account inactive`);
+            log(`[UnifiedLogin] Tenant ${tenant.name} check complete: account_inactive`);
+            foundInactiveTenant = { tenant, userType: 'office_staff' };
+            continue;
+          }
+
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Found and active, verifying password`);
+          }
+
+          const isPasswordValid = await bcrypt.compare(password, staff.password);
+
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Password valid:`, isPasswordValid);
+          }
+
+          if (!isPasswordValid) {
+            console.log(`[UnifiedLogin][${tenant.name}][OfficeStaff] Password verification failed`);
+            console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: password_invalid`);
+            return res.status(401).json({
+              success: false,
+              message: 'Invalid credentials'
+            });
+          }
+
+          foundTenantUser = {
+            user: staff,
+            tenant: tenant,
+            userType: 'office_staff'
+          };
+          console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: success`);
+          break;
         }
 
         // Check Repo Agents
         const RepoAgent = getRepoAgentModel(conn);
-        const agent = await RepoAgent.findOne({
-          $or: [
-            { email: identifier.toLowerCase().trim() },
-            { phoneNumber: identifier.trim() }
-          ]
-        });
+        if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+          console.log('[UnifiedLogin] Using RepoAgent model with schema fields:', Object.keys(RepoAgent.schema.paths));
+        }
+        const agentRaw = String(identifier || '').trim();
+        const agentDigits = agentRaw.replace(/\D/g, '');
+        const emailId = String(identifier || '').toLowerCase().trim();
+        
+        // Query for agent - explicitly select password field to ensure it's included
+        // Try with select first, if that fails (field doesn't have select: false), try without
+        let agent = null;
+        try {
+          agent = await RepoAgent.findOne({
+            $or: [
+              { email: emailId },
+              { phoneNumber: agentRaw },
+              { phoneNumber: agentDigits }
+            ]
+          }).select('+password');
+        } catch (selectError) {
+          // If select('+password') fails, try without it (password might not have select: false)
+          console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Select +password failed, trying without select`);
+          agent = await RepoAgent.findOne({
+            $or: [
+              { email: emailId },
+              { phoneNumber: agentRaw },
+              { phoneNumber: agentDigits }
+            ]
+          });
+        }
 
-        if (agent && agent.status === 'active') {
-          const isPasswordValid = await bcrypt.compare(password, agent.password);
-          
-          if (isPasswordValid) {
-            foundTenantUser = {
-              user: agent,
-              tenant: tenant,
-              userType: 'repo_agent'
-            };
-            break;
+        if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+          console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Query result:`, agent ? 'Found' : 'Not found');
+          if (agent) {
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Agent email:`, agent.email);
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Agent phone:`, agent.phoneNumber);
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password exists:`, !!agent.password);
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password length:`, agent.password ? agent.password.length : 0);
           }
+        }
+
+        if (agent) {
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Status:`, agent?.status);
+          }
+
+          if (agent.status !== 'active') {
+            log(`[UnifiedLogin][${tenant.name}][RepoAgent] Account inactive`);
+            log(`[UnifiedLogin] Tenant ${tenant.name} check complete: account_inactive`);
+            foundInactiveTenant = { tenant, userType: 'repo_agent' };
+            continue;
+          }
+
+          if (!agent.password) {
+            console.error(`[UnifiedLogin][${tenant.name}][RepoAgent] Password field is missing or null`);
+            console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: password_missing`);
+            continue;
+          }
+
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Found and active, verifying password`);
+          }
+
+          const provided = String(password || '').trim();
+          const stored = String(agent.password || '').trim();
+          let isPasswordValid = false;
+
+          // Try bcrypt comparison first
+          try {
+            isPasswordValid = await bcrypt.compare(provided, stored);
+          } catch (err) {
+            console.error(`[UnifiedLogin][${tenant.name}][RepoAgent] Bcrypt compare error:`, err.message);
+            isPasswordValid = false;
+          }
+
+          // Backward compatibility: if stored password is plaintext and matches, migrate to hashed
+          if (!isPasswordValid && stored === provided) {
+            try {
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Plaintext password detected, migrating to hash`);
+              const salt = await bcrypt.genSalt(12);
+              agent.password = await bcrypt.hash(provided, salt);
+              await agent.save();
+              isPasswordValid = true;
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password migrated successfully`);
+            } catch (err) {
+              console.error(`[UnifiedLogin][${tenant.name}][RepoAgent] Password migration error:`, err.message);
+              isPasswordValid = false;
+            }
+          }
+
+          if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password valid:`, isPasswordValid);
+            if (!isPasswordValid) {
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password comparison failed`);
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Provided password length:`, provided.length);
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Stored password length:`, stored.length);
+              console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Stored password starts with $2b$ (bcrypt):`, stored.startsWith('$2b$'));
+            }
+          }
+
+          if (!isPasswordValid) {
+            console.log(`[UnifiedLogin][${tenant.name}][RepoAgent] Password verification failed`);
+            console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: password_invalid`);
+            foundInvalidPassword = true;
+            continue; // Continue checking other tenants instead of returning immediately
+          }
+
+          foundTenantUser = {
+            user: agent,
+            tenant: tenant,
+            userType: 'repo_agent'
+          };
+          console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: success`);
+          break;
+        }
+
+        if (!foundTenantUser) {
+          console.log(`[UnifiedLogin] Tenant ${tenant.name} check complete: user_not_found`);
         }
 
       } catch (error) {
@@ -210,18 +277,57 @@ const unifiedLogin = async (req, res) => {
       }
     }
 
+    // Add a small constant-time delay to prevent timing attacks
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Handle inactive account case first
+    if (foundInactiveTenant && !foundTenantUser) {
+      return res.status(401).json({
+        success: false,
+        message: 'Your account is inactive. Please contact your administrator.'
+      });
+    }
+
+    // Handle invalid password case
+    if (foundInvalidPassword && !foundTenantUser) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+
     if (foundTenantUser) {
       const { user, tenant, userType } = foundTenantUser;
-      
-      const token = generateToken({
+
+      // Clear forceLogoutAt on successful login for repo agents
+      if (userType === 'repo_agent' && user.forceLogoutAt) {
+        user.forceLogoutAt = null;
+        await user.save();
+      }
+
+      // Build token payload with conditional fields
+      const tokenPayload = {
         userId: user._id,
         userType: userType,
         tenantId: tenant._id,
         tenantName: tenant.name,
         role: user.role || userType
-      });
+      };
 
-      console.log('[UnifiedLogin] Tenant user login successful');
+      // Add user-type-specific numeric ID field and also Mongo _id under a distinct key
+      if (userType === 'repo_agent') {
+        tokenPayload.agentId = user.agentId || user._id; // numeric field or Mongo _id fallback
+        tokenPayload.agentDbId = user._id; // always include Mongo _id
+      } else if (userType === 'office_staff') {
+        tokenPayload.staffId = user.staffId || user._id; // numeric field or Mongo _id fallback
+        tokenPayload.staffDbId = user._id; // always include Mongo _id
+      }
+
+      const token = generateToken(tokenPayload);
+
+      if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+        console.log('[UnifiedLogin] Tenant user login successful');
+      }
 
       return res.json({
         success: true,
@@ -243,6 +349,9 @@ const unifiedLogin = async (req, res) => {
       });
     }
 
+    if (process.env.NODE_ENV === 'development' || process.env.DEBUG_AUTH === 'true') {
+      console.log('[UnifiedLogin] No matching user found in any tenant');
+    }
     // If no user found
     return res.status(401).json({
       success: false,
@@ -263,6 +372,7 @@ const unifiedLogin = async (req, res) => {
 const getUnifiedProfile = async (req, res) => {
   try {
     const { userId, userType, tenantId, tenantName } = req.user;
+    console.log(`[UnifiedProfile] Fetching profile for userType: ${userType}, userId: ${userId}`);
 
     if (userType === 'main_user') {
       // Get main user profile
@@ -289,9 +399,11 @@ const getUnifiedProfile = async (req, res) => {
 
       if (userType === 'office_staff') {
         const OfficeStaff = getOfficeStaffModel(conn);
+        console.log(`[UnifiedProfile] Using OfficeStaff model for tenant: ${tenantName}`);
         user = await OfficeStaff.findById(userId);
       } else if (userType === 'repo_agent') {
         const RepoAgent = getRepoAgentModel(conn);
+        console.log(`[UnifiedProfile] Using RepoAgent model for tenant: ${tenantName}`);
         user = await RepoAgent.findById(userId);
       }
 
